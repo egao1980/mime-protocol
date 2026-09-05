@@ -1,7 +1,7 @@
 (in-package #:mime-protocol/tests)
 
 (defun %utf8 (octets)
-  (babel:octets-to-string octets :encoding :utf-8))
+  (encoding-protocol:decode octets))
 
 (deftest text-entity-roundtrip
   (let* ((e (make-text-entity "hello" :subtype "plain"))

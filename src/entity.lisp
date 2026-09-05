@@ -85,10 +85,10 @@
             (setf headers (nconc headers (list (cons name value))))))))))
 
 (defun %octets-to-ascii (octets)
-  (babel:octets-to-string octets :encoding :latin-1))
+  (encoding-protocol:decode octets :encoding :iso-8859-1))
 
 (defun %ascii-to-octets (string)
-  (babel:string-to-octets string :encoding :latin-1))
+  (encoding-protocol:encode string :encoding :iso-8859-1))
 
 (defun %search-octets (pattern haystack &optional (start 0))
   (let ((plen (length pattern))
@@ -260,7 +260,7 @@
                                :content-type (make-media-type "text" subtype
                                                               (when charset
                                                                 (list (cons "charset" charset))))
-                               :content (babel:string-to-octets text :encoding :utf-8)
+                               :content (encoding-protocol:encode text)
                                :transfer-encoding :8bit)))
     (when (or disposition-type name filename)
       (setf (mime-content-disposition entity)
