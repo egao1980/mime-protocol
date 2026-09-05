@@ -1,9 +1,9 @@
 (defsystem "mime-protocol"
-  :version "0.1.2"
+  :version "0.1.3"
   :description "CLOS MIME media-type, disposition, CTE, and multipart for cl-stack (RFC 2045/2046/6266)"
   :author "egao1980"
   :license "MIT"
-  :depends-on ("babel" "serdes-protocol" "encoding-protocol")
+  :depends-on ("serdes-protocol" "encoding-protocol")
   :serial t
   :pathname "src"
   :components ((:file "package")

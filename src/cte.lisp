@@ -21,7 +21,7 @@
 (defun %as-octets (source)
   (etypecase source
     ((vector (unsigned-byte 8)) source)
-    (string (babel:string-to-octets source :encoding :utf-8))
+    (string (encoding-protocol:encode source))
     (vector
      (if (and (not (stringp source))
               (every (lambda (b) (typep b '(unsigned-byte 8))) source))
@@ -32,9 +32,9 @@
   (etypecase source
     (string source)
     ((vector (unsigned-byte 8))
-     (babel:octets-to-string source :encoding :ascii))
+     (encoding-protocol:decode source :encoding :ascii))
     (vector
-     (babel:octets-to-string (coerce source '(vector (unsigned-byte 8))) :encoding :ascii))))
+     (encoding-protocol:decode (coerce source '(vector (unsigned-byte 8))) :encoding :ascii))))
 
 (defun encode-base64 (octets)
   "RFC 2045 Base64 with 76-column wrapping."

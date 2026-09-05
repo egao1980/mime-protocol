@@ -42,7 +42,7 @@
                  (t
                   (vector-push (char-code c) octets)
                   (incf i)))))
-    (babel:octets-to-string (coerce octets '(vector (unsigned-byte 8))) :encoding :utf-8)))
+    (encoding-protocol:decode (coerce octets '(vector (unsigned-byte 8))))))
 
 (defun %parse-rfc5987 (value)
   "charset ' [lang] ' value-chars → decoded string."

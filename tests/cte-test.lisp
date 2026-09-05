@@ -1,21 +1,21 @@
 (in-package #:mime-protocol/tests)
 
 (deftest base64-roundtrip
-  (let* ((raw (babel:string-to-octets "hi?" :encoding :utf-8))
+  (let* ((raw (encoding-protocol:encode "hi?" :encoding :utf-8))
          (b64 (encode-content raw :base64))
          (back (decode-content b64 :base64)))
     (ok (stringp b64))
     (ok (equalp raw back))))
 
 (deftest quoted-printable-roundtrip
-  (let* ((raw (babel:string-to-octets (format nil "a=~C~%b" #\Space) :encoding :utf-8))
+  (let* ((raw (encoding-protocol:encode (format nil "a=~C~%b" #\Space) :encoding :utf-8))
          (qp (encode-content raw :quoted-printable))
          (back (decode-content qp :quoted-printable)))
     (ok (find #\= qp :test #'char=))
     (ok (equalp raw back))))
 
 (deftest identity-cte
-  (let ((raw (babel:string-to-octets "plain" :encoding :utf-8)))
+  (let ((raw (encoding-protocol:encode "plain" :encoding :utf-8)))
     (ok (equalp raw (decode-content (encode-content raw :7bit) :7bit)))
     (ok (equalp raw (decode-content (encode-content raw :binary) :8bit)))))
 
