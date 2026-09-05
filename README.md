@@ -21,7 +21,7 @@ OCI **0.1.0** — `ghcr.io/egao1980/cl-systems/mime-protocol:0.1.0`
 | `:mime` | RFC 2045 entity | `mime-entity` |
 | `:multipart` | `multipart/form-data` | alist / hash-table of parts |
 
-`lookup-mime` / `mime-type` map filename extensions. CTE is `decode-content` / `encode-content` (`:7bit` `:8bit` `:binary` `:base64` `:quoted-printable`).
+`lookup-mime` / `mime-type` map filename extensions. `lookup-extension` is the reverse (first table match: `application/json` → `json`, `text/html` → `html`). CTE is `decode-content` / `encode-content` (`:7bit` `:8bit` `:binary` `:base64` `:quoted-printable`).
 
 ## License
 

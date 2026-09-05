@@ -57,6 +57,7 @@
            #:multipart-p
 
            #:lookup-mime
+           #:lookup-extension
            #:mime-type
 
            #:mime-serdes-backend
