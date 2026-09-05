@@ -1,11 +1,9 @@
 (defsystem "mime-protocol"
-  :version "0.1.1"
+  :version "0.1.2"
   :description "CLOS MIME media-type, disposition, CTE, and multipart for cl-stack (RFC 2045/2046/6266)"
   :author "egao1980"
   :license "MIT"
   :depends-on ("babel" "serdes-protocol" "encoding-protocol")
-  :properties (:cl-repo (:ci (:sources (("serdes-protocol" :oci)
-                                        ("encoding-protocol" :oci)))))
   :serial t
   :pathname "src"
   :components ((:file "package")
@@ -24,6 +22,7 @@
   :serial t
   :components ((:file "package")
                (:file "media-type-test")
+               (:file "lookup-test")
                (:file "cte-test")
                (:file "multipart-test"))
   :perform (test-op (o c)
