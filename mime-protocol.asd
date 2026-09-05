@@ -4,7 +4,7 @@
   :author "egao1980"
   :license "MIT"
   :depends-on ("babel" "serdes-protocol" "encoding-protocol")
-:serial t
+  :serial t
   :pathname "src"
   :components ((:file "package")
                (:file "conditions")
