@@ -18,7 +18,14 @@
     ("pdf" . "application/pdf")
     ("zip" . "application/zip")
     ("gz" . "application/gzip")
+    ("bz2" . "application/x-bzip2")
+    ("xz" . "application/x-xz")
+    ("lzma" . "application/x-lzma")
     ("tar" . "application/x-tar")
+    ("tgz" . "application/x-tar")
+    ("tbz" . "application/x-tar")
+    ("tbz2" . "application/x-tar")
+    ("txz" . "application/x-tar")
     ("wasm" . "application/wasm")
     ("bin" . "application/octet-stream")
     ("cbor" . "application/cbor")
@@ -82,3 +89,60 @@
                          (and mt (media-type-essentials mt))))
                       (t nil))))
     (and essentials (gethash essentials *mime-type-extensions*))))
+
+(defparameter *content-encodings*
+  '(("gz" . "gzip")
+    ("bz2" . "bzip2")
+    ("xz" . "xz")
+    ("lzma" . "lzma")
+    ("z" . "compress")))
+
+(defparameter *suffix-map*
+  '(("tgz" . "tar.gz")
+    ("taz" . "tar.gz")
+    ("tbz" . "tar.bz2")
+    ("tbz2" . "tar.bz2")
+    ("txz" . "tar.xz")))
+
+(defun %filename-of (name)
+  (string-downcase (etypecase name
+                     (pathname (file-namestring name))
+                     (string (let ((slash (position #\/ name :from-end t)))
+                               (if slash (subseq name (1+ slash)) name))))))
+
+(defun %apply-suffix-map (filename)
+  (let* ((dot (position #\. filename :from-end t))
+         (ext (and dot (subseq filename (1+ dot))))
+         (mapped (and ext (cdr (assoc ext *suffix-map* :test #'string=)))))
+    (if mapped
+        (concatenate 'string (subseq filename 0 (1+ dot)) mapped)
+        filename)))
+
+(defun guess-type (name)
+  "Python mimetypes.guess_type — (values type encoding).
+   `.tar.gz` → application/x-tar + gzip. Unknown type is NIL, not octet-stream."
+  (let* ((filename (%apply-suffix-map (%filename-of name)))
+         (encoding nil)
+         (dot (position #\. filename :from-end t)))
+    (when dot
+      (let* ((ext (subseq filename (1+ dot)))
+             (enc (cdr (assoc ext *content-encodings* :test #'string=))))
+        (when enc
+          (setf encoding enc
+                filename (subseq filename 0 dot)
+                dot (position #\. filename :from-end t)))))
+    (values (and dot (gethash (subseq filename (1+ dot)) *mime-extensions*))
+            encoding)))
+
+(defun add-type (type extension)
+  "Register EXTENSION (with or without leading dot) → TYPE. Updates both tables."
+  (check-type type string)
+  (let* ((ext (string-downcase
+               (string-left-trim "." (etypecase extension
+                                       (string extension)
+                                       (symbol (string extension))))))
+         (mime (string-downcase type)))
+    (setf (gethash ext *mime-extensions*) mime)
+    (unless (gethash mime *mime-type-extensions*)
+      (setf (gethash mime *mime-type-extensions*) ext))
+    mime))
