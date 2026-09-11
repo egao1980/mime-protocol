@@ -59,6 +59,8 @@
            #:lookup-mime
            #:lookup-extension
            #:mime-type
+           #:guess-type
+           #:add-type
 
            #:mime-serdes-backend
            #:multipart-serdes-backend

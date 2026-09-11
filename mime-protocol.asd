@@ -1,5 +1,5 @@
 (defsystem "mime-protocol"
-  :version "0.1.3"
+  :version "0.1.4"
   :description "CLOS MIME media-type, disposition, CTE, and multipart for cl-stack (RFC 2045/2046/6266)"
   :author "egao1980"
   :license "MIT"
