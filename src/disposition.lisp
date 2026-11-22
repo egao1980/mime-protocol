@@ -88,15 +88,94 @@
                    :type type
                    :parameters (nreverse parameters))))
 
-(defun format-content-disposition (disposition)
-  (check-type disposition content-disposition)
+(defun %attr-char-p (char)
+  "RFC 8187 attr-char: ALPHA / DIGIT / ! # $ & + - . ^ _ ` | ~"
+  (and (< (char-code char) 128)
+       (or (alphanumericp char)
+           (find char "!#$&+-.^_`|~" :test #'char=))))
+
+(defun %ascii-p (string)
+  (every (lambda (c) (< (char-code c) 128)) string))
+
+(defun encode-rfc5987-value (string)
+  "STRING as an RFC 8187 (RFC 5987) ext-value: UTF-8''<percent-encoded octets>.
+   Every octet outside attr-char is percent-encoded, so the result is plain
+   ASCII and contains no quote, CR or LF."
   (with-output-to-string (o)
-    (write-string (content-disposition-type disposition) o)
-    (dolist (p (content-disposition-parameters disposition))
-      (write-string "; " o)
-      (write-string (car p) o)
-      (write-char #\= o)
-      (write-string (%quote-parameter-value (cdr p)) o))))
+    (write-string "UTF-8''" o)
+    (loop for b across (encoding-protocol:encode string :encoding :utf-8)
+          for c = (code-char b)
+          do (if (and (< b 128) (%attr-char-p c))
+                 (write-char c o)
+                 (format o "%~2,'0X" b)))))
+
+(defun %ext-value-p (value)
+  "Already an RFC 8187 ext-value (charset'lang'attr-chars / %XX)?"
+  (let* ((q1 (position #\' value))
+         (q2 (and q1 (position #\' value :start (1+ q1)))))
+    (and q2
+         (plusp q1)
+         (every #'%attr-char-p (subseq value 0 q1))
+         (every (lambda (c) (or (%attr-char-p c) (char= c #\%)))
+                (subseq value (1+ q2))))))
+
+(defun %write-disposition-parameter (o name value)
+  (write-string "; " o)
+  (write-string name o)
+  (write-char #\= o)
+  (if (and (plusp (length name)) (char= #\* (char name (1- (length name)))))
+      ;; ext-value (RFC 8187): never quoted; encode unless already encoded.
+      (write-string (if (%ext-value-p value) value (encode-rfc5987-value value)) o)
+      (write-string (%quote-parameter-value value) o)))
+
+(defun format-content-disposition (disposition)
+  "Serialize DISPOSITION (RFC 6266). Parameter values are quoted as needed;
+   a value with CR, LF or another control character signals MIME-ENCODE-ERROR.
+   Parameters named NAME* are written as RFC 8187 ext-values, and a non-ASCII
+   filename without a filename* also gets filename*=UTF-8''..."
+  (check-type disposition content-disposition)
+  (let ((params (content-disposition-parameters disposition)))
+    (with-output-to-string (o)
+      (write-string (content-disposition-type disposition) o)
+      (dolist (p params)
+        (%write-disposition-parameter o (car p) (cdr p)))
+      (let ((filename (cdr (assoc "filename" params :test #'string=))))
+        (when (and filename
+                   (not (%ascii-p filename))
+                   (not (assoc "filename*" params :test #'string=)))
+          (%write-disposition-parameter o "filename*" filename))))))
+
+(defun %form-data-escape (string)
+  "RFC 7578 section 2 / WHATWG multipart/form-data: percent-encode \" CR LF in
+   a quoted name or filename, so no value can end the quoted-string or the
+   header line. Other characters (including UTF-8) are kept."
+  ;; CR and LF are escaped below; any other control character is refused.
+  (%check-header-text
+   (remove-if (lambda (c) (member c '(#\Return #\Newline))) string))
+  (with-output-to-string (o)
+    (loop for c across string
+          do (case c
+               (#\" (write-string "%22" o))
+               (#\Return (write-string "%0D" o))
+               (#\Newline (write-string "%0A" o))
+               (t (write-char c o))))))
+
+(defun format-form-data-disposition (name &key filename)
+  "Content-Disposition value for a multipart/form-data part (RFC 7578):
+   form-data; name=\"NAME\"[; filename=\"FILENAME\"[; filename*=UTF-8''...]]
+
+   NAME and FILENAME are always quoted, with \" CR LF percent-encoded (the
+   browser rule), so they cannot add parameters or headers. A non-ASCII
+   FILENAME is sent as UTF-8 in filename (RFC 7578 section 4.2) and also as an
+   RFC 8187 filename* for receivers that only read that."
+  (check-type name string)
+  (check-type filename (or null string))
+  (with-output-to-string (o)
+    (format o "form-data; name=\"~A\"" (%form-data-escape name))
+    (when filename
+      (format o "; filename=\"~A\"" (%form-data-escape filename))
+      (unless (%ascii-p filename)
+        (format o "; filename*=~A" (encode-rfc5987-value filename))))))
 
 (defun disposition-parameter (disposition name)
   (cdr (assoc (string-downcase name) (content-disposition-parameters disposition)
