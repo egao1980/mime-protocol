@@ -28,7 +28,8 @@
         finally (return i)))
 
 (defun %tchar-p (char)
-  (or (alphanumericp char)
+  ;; RFC 9110 tchar is ASCII only.
+  (or (and (< (char-code char) 128) (alphanumericp char))
       (find char "!#$%&'*+-.^_`|~" :test #'char=)))
 
 (defun %read-token (string start)
@@ -101,7 +102,22 @@
                    :subtype subtype
                    :parameters (nreverse parameters))))
 
+(defun %check-header-text (value)
+  "Refuse control characters (CR, LF, NUL, ...; HTAB is allowed) in a header
+   parameter value: a CR or LF would end the header line and let the rest of
+   VALUE forge further headers."
+  (let ((bad (find-if (lambda (c)
+                        (let ((code (char-code c)))
+                          (or (and (< code 32) (/= code 9)) (= code 127))))
+                      value)))
+    (when bad
+      (error 'mime-encode-error
+             :message (format nil "control character U+~4,'0X in header parameter ~S"
+                              (char-code bad) value))))
+  value)
+
 (defun %quote-parameter-value (value)
+  (%check-header-text value)
   (if (and (plusp (length value)) (every #'%tchar-p value))
       value
       (with-output-to-string (o)

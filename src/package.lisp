@@ -27,6 +27,8 @@
            #:make-content-disposition
            #:parse-content-disposition
            #:format-content-disposition
+           #:format-form-data-disposition
+           #:encode-rfc5987-value
            #:disposition-parameter
            #:disposition-filename
            #:disposition-name
