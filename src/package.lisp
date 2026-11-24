@@ -4,7 +4,10 @@
   (:export #:mime-error
            #:mime-parse-error
            #:mime-encode-error
+           #:mime-header-error
            #:mime-error-message
+           #:mime-header-error-name
+           #:mime-header-error-value
 
            #:media-type
            #:media-type-p
@@ -52,11 +55,16 @@
            #:parse-headers
            #:parse-mime
            #:print-mime
+           #:print-mime-octets
            #:make-text-entity
            #:make-binary-entity
            #:make-multipart-entity
            #:make-form-data
            #:multipart-p
+
+           #:encode-header-text
+           #:encode-encoded-words
+           #:decode-header-text
 
            #:lookup-mime
            #:lookup-extension
@@ -69,6 +77,8 @@
            #:use-mime-serdes-backend
            #:use-multipart-serdes-backend
            #:install-http-mime-hooks
-           #:canonical-header-name))
+           #:canonical-header-name
+           #:mime-boundary-error
+           #:mime-boundary-error-boundary))
 
 (in-package #:mime-protocol)

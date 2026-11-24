@@ -4,7 +4,7 @@ CLOS **MIME** media-type, Content-Disposition, Content-Transfer-Encoding, and mu
 
 Not HTTP `Content-Encoding` (gzip/br/zstd) — that stays on `http-protocol`.
 
-OCI **0.3.1** — `ghcr.io/egao1980/cl-systems/mime-protocol:0.3.1`
+OCI **0.3.2** — `ghcr.io/egao1980/cl-systems/mime-protocol:0.3.2`
 
 ```lisp
 (asdf:load-system "mime-protocol")   ; nick stack-mime; registers :mime / :multipart
@@ -30,6 +30,18 @@ OCI **0.3.1** — `ghcr.io/egao1980/cl-systems/mime-protocol:0.3.1`
 Headers are stored lowercase (`header-value` and `set-header` are case-insensitive) and printed in canonical case by `canonical-header-name`: `From`, `Subject`, `MIME-Version`, `Message-ID`, `Content-Transfer-Encoding`, `DKIM-Signature`.
 
 `parse-mime` reads each header field as UTF-8 when its octets are valid UTF-8 (browsers send form-data part headers that way, RFC 7578 §5.1.3; RFC 6532 mail does too), and as ISO-8859-1 otherwise, one character per octet.
+
+`print-mime` returns octets, one character per octet: body octets as they are and header text as UTF-8. Write the string to the wire through ISO-8859-1, or call `print-mime-octets`; `parse-mime` reads either back, whatever the header text (#16). The http-protocol `:mime` / `:multipart` data serializers hand http-protocol those octets.
+
+## Header fields
+
+`set-header` refuses a value holding CR, LF or NUL, and a name that is not RFC 5322 ftext (printable ASCII without a colon), with `mime-header-error` (a `mime-encode-error`; readers `mime-header-error-name`, `mime-header-error-value`). A line break in a value would end the field, so the rest would be read as further fields (`Bcc:`) or the body: header injection (#12). Python's `EmailMessage` refuses CR and LF in a value too. Restart `use-value` takes another value or name, which is checked again.
+
+`print-mime` checks again what reached the headers some other way (`(setf mime-headers)`, a parsed field) and signals the same condition before it writes anything: a value with CR or LF (a bare CR survives `parse-headers`), or a name that is not ftext (a name with a blank, a colon or a non-ASCII character would merge into the field before it or end the header block in an RFC 5322 reader). A header line longer than `:max-line-length` octets (default 998, RFC 5322 §2.1.1's limit; mail passes 78) is folded before a single space inside the value, so unfolding gives the value back exactly. A token with no space in it is not cut, and a line that stays over 998 is refused. `nil` never folds or refuses: HTTP form-data has no line limit, and the `:multipart` serdes format and the http-protocol hook pass it.
+
+A multipart part, or the preamble, that holds its own delimiter line (`--boundary` at a line start) would end the part early and let the rest pose as further parts. `print-mime` refuses it with `mime-boundary-error` (a `mime-encode-error`; restart `use-value` takes another boundary). `parse-mime` finds a non-ASCII boundary in the body as UTF-8 or as one octet per character, so a received ISO-8859-1 boundary still parses and re-prints. `make-multipart-entity`'s default boundary is 96 random bits from the OS.
+
+RFC 2047 encoded-words: `encode-header-text` turns the runs of words in unstructured text (Subject) that need it (non-ASCII, control characters, `=?`, longer than a line) into `=?utf-8?b?...?=` words and leaves the rest as it is; it refuses CR, LF and NUL as `set-header` does. `encode-encoded-words` encodes all of a text (a display name). Each word holds whole characters and is at most 64 characters. `decode-header-text` reads B and Q words in any charset encoding-protocol knows, drops blanks between adjacent words, decodes a character split across two words, and keeps a malformed word as written.
 
 ## Form-data names
 

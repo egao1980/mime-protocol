@@ -24,8 +24,93 @@
 (defun header-value (entity name)
   (cdr (assoc (string-downcase name) (mime-headers entity) :test #'string=)))
 
+(defun %char-description (char)
+  (let ((code (char-code char)))
+    (format nil "U+~4,'0X~@[ (~A)~]" code
+            (case code (0 "NUL") (9 "HTAB") (10 "LF") (13 "CR") (32 "space") (58 "colon")))))
+
+(defun %ftext-p (char)
+  "RFC 5322 3.6.8 ftext: printable US-ASCII except colon."
+  (let ((code (char-code char)))
+    (and (<= 33 code 126) (/= code 58))))
+
+(defun %header-name-problem (name)
+  "Why NAME cannot name a header field, or NIL. SET-HEADER and PRINT-MIME
+both ask it: a name with a blank, a colon, a control or a non-ASCII
+character would end the header block early or merge the field into the one
+before it in an RFC 5322 reader."
+  (cond
+   ((not (typep name '(or string symbol character)))
+    (format nil "name ~S is not a string" name))
+   ((zerop (length (string name)))
+    "the name is empty")
+   (t
+    (let ((bad (find-if-not #'%ftext-p (string name))))
+      (when bad
+        (format nil "the name holds ~A; a field name is printable ASCII without a colon (RFC 5322 3.6.8)"
+                (%char-description bad)))))))
+
+(defun %forbidden-char-problem (value codes)
+  (if (not (stringp value))
+      (format nil "value ~S is not a string" value)
+      (let ((i (position-if (lambda (c) (member (char-code c) codes)) value)))
+        (when i
+          (let ((char (char value i)))
+            (format nil "the value holds ~A at ~D~:[; NUL is not allowed in a header (RFC 2045 2.7)~;; a line break ends the field, so the rest would be read as further fields or the body (header injection)~]"
+                    (%char-description char) i (/= 0 (char-code char))))))))
+
+(defun %header-value-problem (value)
+  "Why SET-HEADER refuses VALUE (CR, LF or NUL in it), or NIL."
+  (%forbidden-char-problem value '(13 10 0)))
+
+(defun %printed-value-problem (value)
+  "Why PRINT-MIME cannot write VALUE (CR or LF in it), or NIL."
+  (%forbidden-char-problem value '(13 10)))
+
+(defun %read-header-text ()
+  (format *query-io* "~&Header text: ")
+  (force-output *query-io*)
+  (list (read-line *query-io*)))
+
+(defun %checked-header-name (name problem)
+  "NAME, unless PROBLEM (a function → reason or NIL) finds fault with it:
+then signal MIME-HEADER-ERROR. Restart USE-VALUE takes another name, which
+is checked the same way."
+  (loop
+    (let ((reason (funcall problem name)))
+      (unless reason
+        (return name))
+      (restart-case (error 'mime-header-error :name name :message reason)
+        (use-value (new-name)
+          :report "Use another header name."
+          :interactive %read-header-text
+          (setf name new-name))))))
+
+(defun %checked-header-value (name value problem)
+  "VALUE of header NAME, unless PROBLEM finds fault with it: then signal
+MIME-HEADER-ERROR. Restart USE-VALUE takes another value, which is checked
+the same way."
+  (loop
+    (let ((reason (funcall problem value)))
+      (unless reason
+        (return value))
+      (restart-case (error 'mime-header-error :name name :value value :message reason)
+        (use-value (new-value)
+          :report "Use another header value."
+          :interactive %read-header-text
+          (setf value new-value))))))
+
 (defun set-header (entity name value)
-  (let* ((key (string-downcase name))
+  "Set the header field NAME of ENTITY to VALUE, replacing a field of that
+name, and return VALUE. NAME is case-insensitive and stored lowercase.
+NAME must be RFC 5322 ftext (printable ASCII without a colon) and VALUE a
+string without CR, LF or NUL: a line break in a value would end the field
+and let the rest of it forge further fields or start the body (header
+injection). Either problem signals MIME-HEADER-ERROR with a USE-VALUE
+restart. A long value needs no line breaks of its own: PRINT-MIME folds it."
+  (let* ((name (%checked-header-name name #'%header-name-problem))
+         (value (%checked-header-value name value #'%header-value-problem))
+         (key (string-downcase name))
          (cell (assoc key (mime-headers entity) :test #'string=)))
     (if cell
         (setf (cdr cell) value)
@@ -120,8 +205,20 @@ other field keeps the ISO-8859-1 reading, one character per octet."
                      always (= (aref pattern j) (aref haystack (+ i j))))
             do (return i))))
 
-(defun %boundary-octets (boundary)
-  (%ascii-to-octets (format nil "--~A" boundary)))
+(defun %boundary-octets (boundary &optional body)
+  "The octets of \"--BOUNDARY\" in BODY. RFC 2046 boundaries are ASCII; a
+non-ASCII one is UTF-8 when PRINT-MIME wrote it, or one octet per character
+when the Content-Type field was not UTF-8. With BODY, the form that starts
+a line of BODY as a delimiter is used, else the UTF-8 one."
+  (let ((utf-8 (concatenate '(vector (unsigned-byte 8)) #(45 45)
+                            (encoding-protocol:encode boundary :encoding :utf-8)))
+        (latin-1 (and (every (lambda (c) (< (char-code c) 256)) boundary)
+                      (%ascii-to-octets (format nil "--~A" boundary)))))
+    (cond
+     ((or (null latin-1) (equalp latin-1 utf-8) (null body)) utf-8)
+     ((%first-delimiter body utf-8) utf-8)
+     ((%first-delimiter body latin-1) latin-1)
+     (t utf-8))))
 
 (defun %eol-after-boundary (body i)
   "Skip transport-padding and the line ending after a dash-boundary. → index."
@@ -146,13 +243,14 @@ that \"--b\" is not found inside \"--b2\"."
   (or (>= i (length body))
       (member (aref body i) '(45 32 9 13 10))))
 
-(defun %next-delimiter (body boundary dash start)
-  "Find the delimiter that ends the part starting at START.
+(defun %next-delimiter (body dash start)
+  "Find the delimiter that ends the part starting at START. DASH is the
+octets of \"--boundary\".
 RFC 2046 §5.1.1: the CRLF before \"--boundary\" belongs to the delimiter,
 not to the part, so a part whose content ends in CRLF keeps it. A bare LF
 is accepted the same way, and a \"--boundary\" with no line break before it
 as a last resort. → (values part-end dash-start) or NIL."
-  (let ((lf-dash (%ascii-to-octets (format nil "~C--~A" #\Newline boundary))))
+  (let ((lf-dash (concatenate '(vector (unsigned-byte 8)) #(10) dash)))
     (loop for from = start then (1+ lf)
           for lf = (%search-octets lf-dash body from)
           while lf
@@ -168,15 +266,19 @@ as a last resort. → (values part-end dash-start) or NIL."
           when (%delimiter-end-p body (+ bare (length dash)))
             do (return (values bare bare)))))
 
+(defun %first-delimiter (body dash)
+  "Where the first dash-boundary DASH starts a line of BODY, or NIL."
+  (loop for from = 0 then (1+ at)
+        for at = (%search-octets dash body from)
+        while at
+        when (and (or (zerop at) (= 10 (aref body (1- at))))
+                  (%delimiter-end-p body (+ at (length dash))))
+          return at))
+
 (defun %split-multipart (body boundary)
   "→ (values preamble parts-octets-list epilogue)"
-  (let* ((dash (%boundary-octets boundary))
-         (start (loop for from = 0 then (1+ at)
-                      for at = (%search-octets dash body from)
-                      while at
-                      when (and (or (zerop at) (= 10 (aref body (1- at))))
-                                (%delimiter-end-p body (+ at (length dash))))
-                        return at)))
+  (let* ((dash (%boundary-octets boundary body))
+         (start (%first-delimiter body dash)))
     (unless start
       (error 'mime-parse-error :message "multipart body missing boundary"))
     (let ((preamble (when (plusp start)
@@ -198,7 +300,7 @@ as a last resort. → (values part-end dash-start) or NIL."
                             (when (< after (length body)) (subseq body after))))))
         (let ((content-start (%eol-after-boundary body (+ i (length dash)))))
           (multiple-value-bind (part-end next-dash)
-              (%next-delimiter body boundary dash content-start)
+              (%next-delimiter body dash content-start)
             (unless part-end
               (error 'mime-parse-error :message "truncated multipart part"))
             (push (subseq body content-start part-end) parts)
@@ -290,46 +392,207 @@ capitalized, acronyms in capitals. \"mime-version\" → \"MIME-Version\",
     (set-header entity "content-transfer-encoding"
                 (string-downcase (symbol-name (mime-transfer-encoding entity))))))
 
-(defun print-mime (entity &key stream)
-  "Serialize ENTITY. Returns a string unless STREAM is supplied. Header
-names are printed with CANONICAL-HEADER-NAME (the model keeps them
-lowercase)."
+(defun %octet-string (string)
+  "STRING the way PRINT-MIME writes header text: one character per UTF-8
+octet. ASCII text comes back as it is."
+  (if (every (lambda (c) (< (char-code c) 128)) string)
+      string
+      (%octets-to-ascii (encoding-protocol:encode string :encoding :utf-8))))
+
+(defun %octet-text (source)
+  "Preamble or epilogue SOURCE, octets (as parsed) or a string, one
+character per octet."
+  (if (stringp source)
+      (%octet-string source)
+      (%octets-to-ascii source)))
+
+(defun %fold-point-p (line i)
+  "Can LINE be folded before index I? Only before a single space between
+two non-blank characters: unfolding (RFC 5322 2.2.3) then gives LINE back,
+also through PARSE-HEADERS, and no folded line is blank."
+  (and (< 0 i (1- (length line)))
+       (char= (char line i) #\Space)
+       (not (%ows-p (char line (1- i))))
+       (not (%ows-p (char line (1+ i))))))
+
+(defun %fold-header-line (line start limit)
+  "LINE, one header field without its CRLF, as a list of lines of at most
+LIMIT characters, cut before spaces at or after START (RFC 5322 2.2.3).
+Each line after the first starts with the space it was cut before. A run
+with no place to cut stays longer than LIMIT. LIMIT NIL: LINE as it is."
+  (if (or (null limit) (<= (length line) limit))
+      (list line)
+      (let ((lines '())
+            (from 0)
+            (fit nil))
+        (flet ((cut (at)
+                 (push (subseq line from at) lines)
+                 (setf from at
+                       fit nil)))
+          (loop for i from start below (length line)
+                when (%fold-point-p line i)
+                  do (loop while (> (- i from) limit)
+                           do (if fit
+                                  (cut fit)
+                                  (progn (cut i) (return))))
+                     (when (> i from)
+                       (setf fit i)))
+          (loop while (and fit (> (- (length line) from) limit))
+                do (cut fit)))
+        (push (subseq line from) lines)
+        (nreverse lines))))
+
+(defun %header-field-lines (name value max-line-length)
+  "The header field NAME: VALUE as PRINT-MIME writes it, as a list of lines
+without CRLF: NAME must be ftext and VALUE hold no CR or LF (see
+%HEADER-NAME-PROBLEM, %PRINTED-VALUE-PROBLEM), the text is UTF-8 octets,
+folded to MAX-LINE-LENGTH inside the value (never before its first word,
+which would leave the name alone on a line and shorten nothing). With a
+MAX-LINE-LENGTH, a line that stays longer than RFC 5322's 998 (2.1.1, a
+MUST) for want of a space signals MIME-HEADER-ERROR: a relay would break
+or refuse it. Each problem has a USE-VALUE restart."
+  (let* ((name (%checked-header-name name #'%header-name-problem))
+         (printed-name (canonical-header-name name)))
+    (loop
+      (setf value (%checked-header-value name value #'%printed-value-problem))
+      (let* ((lines (%fold-header-line (concatenate 'string printed-name ": " (%octet-string value))
+                                       (+ 2 (length printed-name))
+                                       max-line-length))
+             (long (and max-line-length
+                        (find-if (lambda (line) (> (length line) 998)) lines))))
+        (unless long
+          (return lines))
+        (restart-case
+            (error 'mime-header-error
+                   :name name :value value
+                   :message (format nil "a line of ~D octets has no space to fold it within RFC 5322's 998 (2.1.1); a relay would break or refuse it"
+                                    (length long)))
+          (use-value (new-value)
+            :report "Use another header value."
+            :interactive %read-header-text
+            (setf value new-value)))))))
+
+(defun %delimiter-line-p (text boundary)
+  "Does TEXT hold a line that starts with --BOUNDARY as a delimiter, so that
+a parser would end a part there? A line starts after LF or CR, or at 0."
+  (let ((dash (concatenate 'string "--" boundary)))
+    (loop for at = (search dash text) then (search dash text :start2 (1+ at))
+          while at
+            thereis (and (or (zerop at)
+                             (member (char text (1- at)) '(#\Newline #\Return)))
+                         (let ((after (+ at (length dash))))
+                           (or (>= after (length text))
+                               (member (char text after)
+                                       '(#\- #\Space #\Tab #\Return #\Newline))))))))
+
+(defun %with-boundary (media-type boundary)
+  "A copy of MEDIA-TYPE whose boundary parameter is BOUNDARY."
+  (make-media-type (media-type-type media-type)
+                   (media-type-subtype media-type)
+                   (if (media-type-boundary media-type)
+                       (mapcar (lambda (p)
+                                 (if (string= "boundary" (car p))
+                                     (cons "boundary" boundary)
+                                     p))
+                               (media-type-parameters media-type))
+                       (append (media-type-parameters media-type)
+                               (list (cons "boundary" boundary))))))
+
+(defun %printed-parts (entity max-line-length)
+  "The parts of multipart ENTITY, printed. Neither its preamble nor a part
+may hold a delimiter line of its boundary: the part would end there and the
+rest be read as further parts with their own headers. Else signal
+MIME-BOUNDARY-ERROR; restart USE-VALUE takes another boundary. → strings."
+  (loop
+    (let ((boundary (and (mime-content-type entity)
+                         (media-type-boundary (mime-content-type entity)))))
+      (unless boundary
+        (error 'mime-encode-error :message "multipart encode needs a boundary"))
+      (let* ((printed (mapcar (lambda (part)
+                                (print-mime part :max-line-length max-line-length))
+                              (mime-parts entity)))
+             (dash (%octet-string boundary))
+             (clash (cond
+                     ((and (mime-preamble entity)
+                           (%delimiter-line-p (%octet-text (mime-preamble entity)) dash))
+                      "the preamble")
+                     (t
+                      (let ((i (position-if (lambda (text) (%delimiter-line-p text dash))
+                                            printed)))
+                        (and i (format nil "part ~D" i)))))))
+        (unless clash
+          (return printed))
+        (restart-case
+            (error 'mime-boundary-error
+                   :boundary boundary
+                   :message (format nil "~A holds the delimiter line --~A, which would end it early"
+                                    clash boundary))
+          (use-value (new-boundary)
+            :report "Use another boundary."
+            :interactive %read-header-text
+            (setf (mime-content-type entity)
+                  (%with-boundary (mime-content-type entity) new-boundary))))))))
+
+(defun print-mime (entity &key stream (max-line-length 998))
+  "Serialize ENTITY. Returns a string unless STREAM is supplied.
+
+The text is octets, one character per octet (ISO-8859-1): body octets as
+they are and header text as UTF-8 (RFC 6532), so the string is written to
+the wire through ISO-8859-1 (or use PRINT-MIME-OCTETS) and PARSE-MIME reads
+it back whatever the header text.
+
+Header names are printed with CANONICAL-HEADER-NAME (the model keeps them
+lowercase). A header line longer than MAX-LINE-LENGTH octets is folded
+before a space (RFC 5322 2.2.3); the default 998 is RFC 5322 2.1.1's limit,
+mail passes 78, and NIL never folds (HTTP has no line limit). A field that
+would forge others or break the header block, a value holding CR or LF, a
+name that is not ftext, or a line that stays over 998 for want of a space,
+signals MIME-HEADER-ERROR (restart USE-VALUE). A multipart whose preamble or
+part holds its own delimiter line signals MIME-BOUNDARY-ERROR (restart
+USE-VALUE takes another boundary). Everything, the body's encoding
+included, is checked before anything is written to STREAM."
   (check-type entity mime-entity)
-  (%ensure-content-type-header entity)
-  (flet ((emit (out)
-           (dolist (h (mime-headers entity))
-             (write-string (canonical-header-name (car h)) out)
-             (write-string ": " out)
-             (write-string (cdr h) out)
-             (%write-crlf out))
-           (%write-crlf out)
-           (if (multipart-p entity)
-               (let* ((boundary (or (and (mime-content-type entity)
-                                         (media-type-boundary (mime-content-type entity)))
-                                    (error 'mime-encode-error
-                                           :message "multipart encode needs a boundary"))))
-                 (when (mime-preamble entity)
-                   (write-string (%octets-to-ascii (mime-preamble entity)) out)
-                   (%write-crlf out))
-                 (dolist (part (mime-parts entity))
-                   (write-string "--" out)
-                   (write-string boundary out)
-                   (%write-crlf out)
-                   (write-string (print-mime part) out)
-                   (%write-crlf out))
-                 (write-string "--" out)
-                 (write-string boundary out)
-                 (write-string "--" out)
-                 (%write-crlf out)
-                 (when (mime-epilogue entity)
-                   (write-string (%octets-to-ascii (mime-epilogue entity)) out)))
-               (let ((wired (encode-content (or (mime-content entity) #())
-                                            (mime-transfer-encoding entity))))
-                 (write-string (if (stringp wired) wired (%octets-to-ascii wired)) out)))))
-    (if stream
-        (progn (emit stream) (values))
-        (with-output-to-string (o)
-          (emit o)))))
+  (check-type max-line-length (or null (integer 1)))
+  (let ((parts (when (multipart-p entity)
+                 (%printed-parts entity max-line-length))))
+    (%ensure-content-type-header entity)
+    (let ((lines (loop for (name . value) in (mime-headers entity)
+                       append (%header-field-lines name value max-line-length)))
+          (body (unless (multipart-p entity)
+                  (let ((wired (encode-content (or (mime-content entity) #())
+                                               (mime-transfer-encoding entity))))
+                    (if (stringp wired) wired (%octets-to-ascii wired))))))
+      (flet ((emit (out)
+               (dolist (line lines)
+                 (write-string line out)
+                 (%write-crlf out))
+               (%write-crlf out)
+               (if (multipart-p entity)
+                   (let ((boundary (%octet-string (media-type-boundary (mime-content-type entity)))))
+                     (when (mime-preamble entity)
+                       (write-string (%octet-text (mime-preamble entity)) out)
+                       (%write-crlf out))
+                     (dolist (part parts)
+                       (write-string "--" out)
+                       (write-string boundary out)
+                       (%write-crlf out)
+                       (write-string part out)
+                       (%write-crlf out))
+                     (write-string "--" out)
+                     (write-string boundary out)
+                     (write-string "--" out)
+                     (%write-crlf out)
+                     (when (mime-epilogue entity)
+                       (write-string (%octet-text (mime-epilogue entity)) out)))
+                   (write-string body out))))
+        (if stream
+            (progn (emit stream) (values))
+            (with-output-to-string (o)
+              (emit o)))))))
+
+(defun print-mime-octets (entity &key (max-line-length 998))
+  "PRINT-MIME's text of ENTITY as the octets that go on the wire."
+  (%ascii-to-octets (print-mime entity :max-line-length max-line-length)))
 
 (defun make-text-entity (text &key (subtype "plain") (charset "utf-8")
                                 disposition-type name filename)
@@ -360,7 +623,12 @@ lowercase)."
     entity))
 
 (defun make-multipart-entity (parts &key (subtype "mixed") boundary)
-  (let ((boundary (or boundary (format nil "----cl-stack-~A" (random (expt 36 10))))))
+  "A multipart/SUBTYPE entity of PARTS. BOUNDARY defaults to 96 random bits
+from the OS, so no part content can know it in advance (PRINT-MIME also
+refuses a part that holds its delimiter line)."
+  (let ((boundary (or boundary
+                      (format nil "----cl-stack-~(~36R~)"
+                              (random (expt 2 96) (make-random-state t))))))
     (make-instance 'mime-entity
                    :content-type (make-media-type "multipart" subtype
                                                   (list (cons "boundary" boundary)))

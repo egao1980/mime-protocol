@@ -51,13 +51,15 @@
                   body))))))
 
 (defmethod serdes-protocol:backend-encode ((backend multipart-serdes-backend) value &key stream)
+  "multipart/form-data for HTTP: no line limit, so no folding (RFC 7578)."
   (declare (ignore backend))
   (print-mime (cond
-                ((mime-entity-p value) value)
-                ((or (hash-table-p value) (listp value)) (make-form-data value))
-                (t (error 'mime-encode-error
-                          :message ":multipart encode expects a mime-entity, alist, or hash-table")))
-              :stream stream))
+               ((mime-entity-p value) value)
+               ((or (hash-table-p value) (listp value)) (make-form-data value))
+               (t (error 'mime-encode-error
+                         :message ":multipart encode expects a mime-entity, alist, or hash-table")))
+              :stream stream
+              :max-line-length nil))
 
 (defmethod serdes-protocol:backend-decode ((backend multipart-serdes-backend) source &key)
   (declare (ignore backend))
@@ -120,7 +122,10 @@
   value)
 
 (defun install-http-mime-hooks ()
-  "If http-protocol is loaded, register :mime / :multipart data (de)serializers."
+  "If http-protocol is loaded, register :mime / :multipart data (de)serializers.
+The serializers return octets (PRINT-MIME-OCTETS): http-protocol encodes a
+string body as UTF-8, which would encode PRINT-MIME's octet text twice.
+HTTP has no line limit, so form-data is not folded."
   (let ((pkg (find-package :http-protocol)))
     (unless pkg
       (return-from install-http-mime-hooks nil))
@@ -129,11 +134,12 @@
                (when (and s (boundp s))
                  (setf (symbol-value s)
                        (acons type fn (remove type (symbol-value s) :key #'car)))))))
-      (push-codec "*DATA-SERIALIZERS*" :mime #'print-mime)
+      (push-codec "*DATA-SERIALIZERS*" :mime #'print-mime-octets)
       (push-codec "*DATA-SERIALIZERS*" :multipart
-                  (lambda (value) (print-mime (if (mime-entity-p value)
-                                                  value
-                                                  (make-form-data value)))))
+                  (lambda (value) (print-mime-octets (if (mime-entity-p value)
+                                                         value
+                                                         (make-form-data value))
+                                                     :max-line-length nil)))
       (push-codec "*DATA-DESERIALIZERS*" :mime #'parse-mime)
       (push-codec "*DATA-DESERIALIZERS*" :multipart
                   (lambda (source)
