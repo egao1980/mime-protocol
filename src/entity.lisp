@@ -35,7 +35,10 @@
     (and (<= 33 code 126) (/= code 58))))
 
 (defun %header-name-problem (name)
-  "Why NAME cannot name a header field SET-HEADER stores, or NIL."
+  "Why NAME cannot name a header field, or NIL. SET-HEADER and PRINT-MIME
+both ask it: a name with a blank, a colon, a control or a non-ASCII
+character would end the header block early or merge the field into the one
+before it in an RFC 5322 reader."
   (cond
    ((not (typep name '(or string symbol character)))
     (format nil "name ~S is not a string" name))
@@ -45,23 +48,6 @@
     (let ((bad (find-if-not #'%ftext-p (string name))))
       (when bad
         (format nil "the name holds ~A; a field name is printable ASCII without a colon (RFC 5322 3.6.8)"
-                (%char-description bad)))))))
-
-(defun %printed-name-problem (name)
-  "Why PRINT-MIME cannot write NAME (a stored, maybe parsed, field name), or
-NIL. Looser than SET-HEADER: only what would break the field structure."
-  (cond
-   ((not (stringp name))
-    (format nil "name ~S is not a string" name))
-   ((zerop (length name))
-    "the name is empty")
-   (t
-    (let ((bad (find-if (lambda (c)
-                          (let ((code (char-code c)))
-                            (or (and (< code 32) (/= code 9)) (= code 127) (= code 58))))
-                        name)))
-      (when bad
-        (format nil "the name holds ~A, which would end or split the field"
                 (%char-description bad)))))))
 
 (defun %forbidden-char-problem (value codes)
@@ -219,8 +205,20 @@ other field keeps the ISO-8859-1 reading, one character per octet."
                      always (= (aref pattern j) (aref haystack (+ i j))))
             do (return i))))
 
-(defun %boundary-octets (boundary)
-  (%ascii-to-octets (format nil "--~A" boundary)))
+(defun %boundary-octets (boundary &optional body)
+  "The octets of \"--BOUNDARY\" in BODY. RFC 2046 boundaries are ASCII; a
+non-ASCII one is UTF-8 when PRINT-MIME wrote it, or one octet per character
+when the Content-Type field was not UTF-8. With BODY, the form that starts
+a line of BODY as a delimiter is used, else the UTF-8 one."
+  (let ((utf-8 (concatenate '(vector (unsigned-byte 8)) #(45 45)
+                            (encoding-protocol:encode boundary :encoding :utf-8)))
+        (latin-1 (and (every (lambda (c) (< (char-code c) 256)) boundary)
+                      (%ascii-to-octets (format nil "--~A" boundary)))))
+    (cond
+     ((or (null latin-1) (equalp latin-1 utf-8) (null body)) utf-8)
+     ((%first-delimiter body utf-8) utf-8)
+     ((%first-delimiter body latin-1) latin-1)
+     (t utf-8))))
 
 (defun %eol-after-boundary (body i)
   "Skip transport-padding and the line ending after a dash-boundary. → index."
@@ -245,13 +243,14 @@ that \"--b\" is not found inside \"--b2\"."
   (or (>= i (length body))
       (member (aref body i) '(45 32 9 13 10))))
 
-(defun %next-delimiter (body boundary dash start)
-  "Find the delimiter that ends the part starting at START.
+(defun %next-delimiter (body dash start)
+  "Find the delimiter that ends the part starting at START. DASH is the
+octets of \"--boundary\".
 RFC 2046 §5.1.1: the CRLF before \"--boundary\" belongs to the delimiter,
 not to the part, so a part whose content ends in CRLF keeps it. A bare LF
 is accepted the same way, and a \"--boundary\" with no line break before it
 as a last resort. → (values part-end dash-start) or NIL."
-  (let ((lf-dash (%ascii-to-octets (format nil "~C--~A" #\Newline boundary))))
+  (let ((lf-dash (concatenate '(vector (unsigned-byte 8)) #(10) dash)))
     (loop for from = start then (1+ lf)
           for lf = (%search-octets lf-dash body from)
           while lf
@@ -267,15 +266,19 @@ as a last resort. → (values part-end dash-start) or NIL."
           when (%delimiter-end-p body (+ bare (length dash)))
             do (return (values bare bare)))))
 
+(defun %first-delimiter (body dash)
+  "Where the first dash-boundary DASH starts a line of BODY, or NIL."
+  (loop for from = 0 then (1+ at)
+        for at = (%search-octets dash body from)
+        while at
+        when (and (or (zerop at) (= 10 (aref body (1- at))))
+                  (%delimiter-end-p body (+ at (length dash))))
+          return at))
+
 (defun %split-multipart (body boundary)
   "→ (values preamble parts-octets-list epilogue)"
-  (let* ((dash (%boundary-octets boundary))
-         (start (loop for from = 0 then (1+ at)
-                      for at = (%search-octets dash body from)
-                      while at
-                      when (and (or (zerop at) (= 10 (aref body (1- at))))
-                                (%delimiter-end-p body (+ at (length dash))))
-                        return at)))
+  (let* ((dash (%boundary-octets boundary body))
+         (start (%first-delimiter body dash)))
     (unless start
       (error 'mime-parse-error :message "multipart body missing boundary"))
     (let ((preamble (when (plusp start)
@@ -297,7 +300,7 @@ as a last resort. → (values part-end dash-start) or NIL."
                             (when (< after (length body)) (subseq body after))))))
         (let ((content-start (%eol-after-boundary body (+ i (length dash)))))
           (multiple-value-bind (part-end next-dash)
-              (%next-delimiter body boundary dash content-start)
+              (%next-delimiter body dash content-start)
             (unless part-end
               (error 'mime-parse-error :message "truncated multipart part"))
             (push (subseq body content-start part-end) parts)
@@ -440,17 +443,34 @@ with no place to cut stays longer than LIMIT. LIMIT NIL: LINE as it is."
         (nreverse lines))))
 
 (defun %header-field-lines (name value max-line-length)
-  "The header field NAME: VALUE as PRINT-MIME writes it: checked (see
-%PRINTED-NAME-PROBLEM, %PRINTED-VALUE-PROBLEM), UTF-8 octets, folded to
-MAX-LINE-LENGTH inside the value (never before its first word, which would
-leave the name alone on a line and shorten nothing). → list of lines
-without CRLF."
-  (let* ((value (%checked-header-value name value #'%printed-value-problem))
-         (name (%checked-header-name name #'%printed-name-problem))
-         (printed-name (%octet-string (canonical-header-name name))))
-    (%fold-header-line (concatenate 'string printed-name ": " (%octet-string value))
-                       (+ 2 (length printed-name))
-                       max-line-length)))
+  "The header field NAME: VALUE as PRINT-MIME writes it, as a list of lines
+without CRLF: NAME must be ftext and VALUE hold no CR or LF (see
+%HEADER-NAME-PROBLEM, %PRINTED-VALUE-PROBLEM), the text is UTF-8 octets,
+folded to MAX-LINE-LENGTH inside the value (never before its first word,
+which would leave the name alone on a line and shorten nothing). With a
+MAX-LINE-LENGTH, a line that stays longer than RFC 5322's 998 (2.1.1, a
+MUST) for want of a space signals MIME-HEADER-ERROR: a relay would break
+or refuse it. Each problem has a USE-VALUE restart."
+  (let* ((name (%checked-header-name name #'%header-name-problem))
+         (printed-name (canonical-header-name name)))
+    (loop
+      (setf value (%checked-header-value name value #'%printed-value-problem))
+      (let* ((lines (%fold-header-line (concatenate 'string printed-name ": " (%octet-string value))
+                                       (+ 2 (length printed-name))
+                                       max-line-length))
+             (long (and max-line-length
+                        (find-if (lambda (line) (> (length line) 998)) lines))))
+        (unless long
+          (return lines))
+        (restart-case
+            (error 'mime-header-error
+                   :name name :value value
+                   :message (format nil "a line of ~D octets has no space to fold it within RFC 5322's 998 (2.1.1); a relay would break or refuse it"
+                                    (length long)))
+          (use-value (new-value)
+            :report "Use another header value."
+            :interactive %read-header-text
+            (setf value new-value)))))))
 
 (defun %delimiter-line-p (text boundary)
   "Does TEXT hold a line that starts with --BOUNDARY as a delimiter, so that
@@ -482,7 +502,7 @@ a parser would end a part there? A line starts after LF or CR, or at 0."
   "The parts of multipart ENTITY, printed. Neither its preamble nor a part
 may hold a delimiter line of its boundary: the part would end there and the
 rest be read as further parts with their own headers. Else signal
-MIME-ENCODE-ERROR; restart USE-VALUE takes another boundary. → strings."
+MIME-BOUNDARY-ERROR; restart USE-VALUE takes another boundary. → strings."
   (loop
     (let ((boundary (and (mime-content-type entity)
                          (media-type-boundary (mime-content-type entity)))))
@@ -503,7 +523,8 @@ MIME-ENCODE-ERROR; restart USE-VALUE takes another boundary. → strings."
         (unless clash
           (return printed))
         (restart-case
-            (error 'mime-encode-error
+            (error 'mime-boundary-error
+                   :boundary boundary
                    :message (format nil "~A holds the delimiter line --~A, which would end it early"
                                     clash boundary))
           (use-value (new-boundary)
@@ -523,19 +544,24 @@ it back whatever the header text.
 Header names are printed with CANONICAL-HEADER-NAME (the model keeps them
 lowercase). A header line longer than MAX-LINE-LENGTH octets is folded
 before a space (RFC 5322 2.2.3); the default 998 is RFC 5322 2.1.1's limit,
-mail passes 78, and NIL never folds. A field that would forge others, a
-value holding CR or LF or a name that is empty or holds a control character
-or colon, signals MIME-HEADER-ERROR (restart USE-VALUE). A multipart whose
-preamble or part holds its own delimiter line signals MIME-ENCODE-ERROR
-(restart USE-VALUE takes another boundary). Everything is checked before
-anything is written to STREAM."
+mail passes 78, and NIL never folds (HTTP has no line limit). A field that
+would forge others or break the header block, a value holding CR or LF, a
+name that is not ftext, or a line that stays over 998 for want of a space,
+signals MIME-HEADER-ERROR (restart USE-VALUE). A multipart whose preamble or
+part holds its own delimiter line signals MIME-BOUNDARY-ERROR (restart
+USE-VALUE takes another boundary). Everything, the body's encoding
+included, is checked before anything is written to STREAM."
   (check-type entity mime-entity)
   (check-type max-line-length (or null (integer 1)))
   (let ((parts (when (multipart-p entity)
                  (%printed-parts entity max-line-length))))
     (%ensure-content-type-header entity)
     (let ((lines (loop for (name . value) in (mime-headers entity)
-                       append (%header-field-lines name value max-line-length))))
+                       append (%header-field-lines name value max-line-length)))
+          (body (unless (multipart-p entity)
+                  (let ((wired (encode-content (or (mime-content entity) #())
+                                               (mime-transfer-encoding entity))))
+                    (if (stringp wired) wired (%octets-to-ascii wired))))))
       (flet ((emit (out)
                (dolist (line lines)
                  (write-string line out)
@@ -558,9 +584,7 @@ anything is written to STREAM."
                      (%write-crlf out)
                      (when (mime-epilogue entity)
                        (write-string (%octet-text (mime-epilogue entity)) out)))
-                   (let ((wired (encode-content (or (mime-content entity) #())
-                                                (mime-transfer-encoding entity))))
-                     (write-string (if (stringp wired) wired (%octets-to-ascii wired)) out)))))
+                   (write-string body out))))
         (if stream
             (progn (emit stream) (values))
             (with-output-to-string (o)

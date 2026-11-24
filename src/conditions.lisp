@@ -22,6 +22,19 @@
    "A header field that cannot be written as one field. A CR or LF in the
 value would end the field and start another one (header injection, RFC 5322
 2.2), and a NUL is not allowed in a header (RFC 2045 2.7); a name must be
-RFC 5322 ftext (printable ASCII, no colon). SET-HEADER and PRINT-MIME signal
-it with a USE-VALUE restart that takes another value (or name), which is
-checked again."))
+RFC 5322 ftext (printable ASCII, no colon), or a reader ends the header
+block there; a line must fold within 998 octets (RFC 5322 2.1.1).
+SET-HEADER and PRINT-MIME signal it with a USE-VALUE restart that takes
+another value (or name), which is checked again."))
+
+(define-condition mime-boundary-error (mime-encode-error)
+  ((boundary :initarg :boundary :reader mime-boundary-error-boundary :initform nil
+             :documentation "The multipart boundary that clashes."))
+  (:report (lambda (c s)
+             (format s "MIME boundary error~@[ (~S)~]: ~A"
+                     (mime-boundary-error-boundary c)
+                     (mime-error-message c))))
+  (:documentation
+   "A multipart part or preamble holds its own delimiter line, so it would
+end early and the rest pose as further parts. PRINT-MIME signals it with a
+USE-VALUE restart that takes another boundary."))

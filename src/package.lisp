@@ -77,6 +77,8 @@
            #:use-mime-serdes-backend
            #:use-multipart-serdes-backend
            #:install-http-mime-hooks
-           #:canonical-header-name))
+           #:canonical-header-name
+           #:mime-boundary-error
+           #:mime-boundary-error-boundary))
 
 (in-package #:mime-protocol)

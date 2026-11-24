@@ -103,12 +103,13 @@
                   (make-binary-entity (coerce #(13 10 13 0 255) '(vector (unsigned-byte 8)))
                                       :filename "x.bin"))
             :boundary "b")))
-    (set-header e "Subject" (format nil "~{~A~^ ~}" (loop repeat 100 collect "word")))
-    (set-header e "X-Token" (make-string 1200 :initial-element #\x))
+    (set-header e "Subject" (format nil "~{~A~^ ~}" (loop repeat 300 collect "word")))
+    (set-header e "X-Token" (make-string 900 :initial-element #\x))
     (ok (%only-crlf-p (print-mime e)) "headers, folded headers, delimiters and a base64 part")
     (ok (%only-crlf-p (print-mime e :max-line-length 78)))
-    (ok (%only-crlf-p (print-mime (make-text-entity "x" :filename (make-string 2000 :initial-element #\y))))
-        "a long parameter")))
+    (ok (%only-crlf-p (print-mime (make-text-entity "x" :filename (make-string 2000 :initial-element #\y))
+                                  :max-line-length nil))
+        "a long parameter, no folding")))
 
 (deftest-parametrize long-header-values-fold-and-unfold
     ((value limit)
@@ -179,11 +180,15 @@
   (let* ((forged (%cr-lf "hello" "--b" "Content-Type: text/html" "" "<p>phish</p>"))
          (e (make-multipart-entity (list (make-text-entity forged) (make-text-entity "two"))
                                    :boundary "b")))
-    (ok (signals (print-mime e) 'mime-encode-error) "part 0 holds --b on a line")
-    (handler-bind ((mime-encode-error (lambda (c) (use-value "c2" c))))
-      (let ((parts (mime-parts (parse-mime (print-mime e)))))
-        (ok (= 2 (length parts)) "a new boundary keeps two parts")
-        (ok (equal forged (%utf8 (mime-content (first parts)))) "and the content")))
+    (ok (signals (print-mime e) 'mime-boundary-error) "part 0 holds --b on a line")
+    (let ((c (handler-case (print-mime e) (mime-boundary-error (c) c))))
+      (ok (equal "b" (mime-boundary-error-boundary c)))
+      (ok (not (typep c 'mime-header-error)) "not a header error"))
+    (let ((parts (mime-parts (parse-mime
+                              (handler-bind ((mime-boundary-error (lambda (c) (use-value "c2" c))))
+                                (print-mime e))))))
+      (ok (= 2 (length parts)) "a new boundary keeps two parts")
+      (ok (equal forged (%utf8 (mime-content (first parts)))) "and the content"))
     (ok (equal "c2" (media-type-boundary (mime-content-type e))))))
 
 (deftest a-preamble-holding-the-delimiter-is-refused
