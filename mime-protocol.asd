@@ -1,6 +1,6 @@
 (defsystem "mime-protocol"
-  :version "0.3.1"
-  :description "CLOS MIME media-type, disposition, CTE, and multipart for cl-stack (RFC 2045/2046/6266)"
+  :version "0.3.2"
+  :description "CLOS MIME media-type, disposition, CTE, and multipart for cl-stack (RFC 2045/2046/2047/6266)"
   :author "egao1980"
   :license "MIT"
   :depends-on ((:version "serdes-protocol" "0.2.2") (:version "encoding-protocol" "0.3.0"))
@@ -13,6 +13,7 @@
                (:file "cte")
                (:file "lookup")
                (:file "entity")
+               (:file "encoded-word")
                (:file "serdes"))
   :in-order-to ((test-op (test-op "mime-protocol/tests"))))
 
@@ -27,7 +28,9 @@
                (:file "multipart-test")
                (:file "disposition-test")
                (:file "nested-multipart-test")
-               (:file "form-data-browser-test"))
+               (:file "form-data-browser-test")
+               (:file "header-injection-test")
+               (:file "encoded-word-test"))
   :perform (test-op (o c)
                     (unless (symbol-call :rove :run c)
                       (error "tests failed for ~A" (component-name c)))))

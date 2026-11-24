@@ -120,7 +120,9 @@
   value)
 
 (defun install-http-mime-hooks ()
-  "If http-protocol is loaded, register :mime / :multipart data (de)serializers."
+  "If http-protocol is loaded, register :mime / :multipart data (de)serializers.
+The serializers return octets (PRINT-MIME-OCTETS): http-protocol encodes a
+string body as UTF-8, which would encode PRINT-MIME's octet text twice."
   (let ((pkg (find-package :http-protocol)))
     (unless pkg
       (return-from install-http-mime-hooks nil))
@@ -129,11 +131,11 @@
                (when (and s (boundp s))
                  (setf (symbol-value s)
                        (acons type fn (remove type (symbol-value s) :key #'car)))))))
-      (push-codec "*DATA-SERIALIZERS*" :mime #'print-mime)
+      (push-codec "*DATA-SERIALIZERS*" :mime #'print-mime-octets)
       (push-codec "*DATA-SERIALIZERS*" :multipart
-                  (lambda (value) (print-mime (if (mime-entity-p value)
-                                                  value
-                                                  (make-form-data value)))))
+                  (lambda (value) (print-mime-octets (if (mime-entity-p value)
+                                                         value
+                                                         (make-form-data value)))))
       (push-codec "*DATA-DESERIALIZERS*" :mime #'parse-mime)
       (push-codec "*DATA-DESERIALIZERS*" :multipart
                   (lambda (source)
