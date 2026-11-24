@@ -59,7 +59,51 @@
                  :message (format nil "unsupported RFC 5987 charset ~S" charset)))
         (%decode-rfc5987-value encoded)))))
 
+(defparameter +form-data-escapes+
+  '(("%22" . #\") ("%0D" . #\Return) ("%0A" . #\Newline))
+  "The escapes a browser writes in a form-data name or filename, and the
+   characters they stand for. %FORM-DATA-ESCAPE writes the same three.")
+
+(defun %form-data-name-parameter-p (type name)
+  "Is NAME the name or filename parameter of a TYPE form-data disposition?"
+  (and (string= type "form-data")
+       (member name '("name" "filename") :test #'string-equal)))
+
+(defun %form-data-unescape (string)
+  "STRING with %22 %0D %0A decoded back to \" CR LF. Any other % is kept."
+  (with-output-to-string (o)
+    (let ((i 0)
+          (n (length string)))
+      (loop while (< i n)
+            do (let ((escape (and (char= (char string i) #\%)
+                                  (<= (+ i 3) n)
+                                  (assoc (subseq string i (+ i 3)) +form-data-escapes+
+                                         :test #'string=))))
+                 (cond
+                  (escape
+                   (write-char (cdr escape) o)
+                   (incf i 3))
+                  (t
+                   (write-char (char string i) o)
+                   (incf i))))))))
+
+(defun %read-form-data-value (string start)
+  "A form-data name or filename value at START: a quoted string ends at the
+   next \", a backslash in it is literal, and %22 %0D %0A decode to \" CR LF.
+   A bare token is read as is. → (values value end)."
+  (if (and (< start (length string)) (char= (char string start) #\"))
+      (let ((close (position #\" string :start (1+ start))))
+        (unless close
+          (error 'mime-parse-error :message "unterminated quoted-string"))
+        (values (%form-data-unescape (subseq string (1+ start) close))
+                (1+ close)))
+      (%read-token string start)))
+
 (defun parse-content-disposition (source)
+  "Parse a Content-Disposition value (RFC 6266). Quoted parameter values
+   take RFC 822 quoted-pairs, except name and filename in a form-data
+   disposition, which are read the way browsers write them (see
+   %READ-FORM-DATA-VALUE). Signals MIME-PARSE-ERROR."
   (let* ((string (string-trim '(#\Space #\Tab #\Return #\Newline) source))
          (i 0)
          type parameters)
@@ -81,7 +125,10 @@
         (unless (and (< i (length string)) (char= (char string i) #\=))
           (error 'mime-parse-error :message (format nil "parameter ~A missing '='" name)))
         (incf i)
-        (multiple-value-bind (value next) (%read-parameter-value string i)
+        (multiple-value-bind (value next)
+            (if (%form-data-name-parameter-p type name)
+                (%read-form-data-value string i)
+                (%read-parameter-value string i))
           (setf i next)
           (push (cons (string-downcase name) value) parameters))))
     (make-instance 'content-disposition
@@ -119,26 +166,36 @@
          (every (lambda (c) (or (%attr-char-p c) (char= c #\%)))
                 (subseq value (1+ q2))))))
 
-(defun %write-disposition-parameter (o name value)
+(defun %write-disposition-parameter (o name value &optional (type ""))
   (write-string "; " o)
   (write-string name o)
   (write-char #\= o)
-  (if (and (plusp (length name)) (char= #\* (char name (1- (length name)))))
-      ;; ext-value (RFC 8187): never quoted; encode unless already encoded.
-      (write-string (if (%ext-value-p value) value (encode-rfc5987-value value)) o)
-      (write-string (%quote-parameter-value value) o)))
+  (cond
+   ((and (plusp (length name)) (char= #\* (char name (1- (length name)))))
+    ;; ext-value (RFC 8187): never quoted; encode unless already encoded.
+    (write-string (if (%ext-value-p value) value (encode-rfc5987-value value)) o))
+   ((and (%form-data-name-parameter-p type name)
+         (not (and (plusp (length value)) (every #'%tchar-p value))))
+    ;; Quoted the browser way, as PARSE-CONTENT-DISPOSITION reads it back.
+    (format o "\"~A\"" (%form-data-escape value)))
+   (t
+    (write-string (%quote-parameter-value value) o))))
 
 (defun format-content-disposition (disposition)
   "Serialize DISPOSITION (RFC 6266). Parameter values are quoted as needed;
    a value with CR, LF or another control character signals MIME-ENCODE-ERROR.
    Parameters named NAME* are written as RFC 8187 ext-values, and a non-ASCII
-   filename without a filename* also gets filename*=UTF-8''..."
+   filename without a filename* also gets filename*=UTF-8''...
+   In a form-data disposition, a name or filename that needs quotes is
+   quoted the browser way, as FORMAT-FORM-DATA-DISPOSITION does: \" CR LF
+   become %22 %0D %0A and a backslash stays literal."
   (check-type disposition content-disposition)
-  (let ((params (content-disposition-parameters disposition)))
+  (let ((params (content-disposition-parameters disposition))
+        (type (content-disposition-type disposition)))
     (with-output-to-string (o)
-      (write-string (content-disposition-type disposition) o)
+      (write-string type o)
       (dolist (p params)
-        (%write-disposition-parameter o (car p) (cdr p)))
+        (%write-disposition-parameter o (car p) (cdr p) type))
       (let ((filename (cdr (assoc "filename" params :test #'string=))))
         (when (and filename
                    (not (%ascii-p filename))

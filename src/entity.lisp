@@ -95,6 +95,23 @@ blank line has no headers (a multipart body part may omit them)."
 (defun %ascii-to-octets (string)
   (encoding-protocol:encode string :encoding :iso-8859-1))
 
+(defun %header-field-text (value)
+  "VALUE holds one header field's octets, read as ISO-8859-1. A field whose
+octets are valid UTF-8 is UTF-8 text: browsers send multipart/form-data
+part headers that way (RFC 7578 §5.1.3), and so does RFC 6532 mail. Any
+other field keeps the ISO-8859-1 reading, one character per octet."
+  (if (every (lambda (c) (< (char-code c) 128)) value)
+      value
+      (handler-case (encoding-protocol:decode-utf-8-strict (%ascii-to-octets value))
+        (encoding-protocol:encoding-decode-error () value))))
+
+(defun %parse-header-octets (octets)
+  "PARSE-HEADERS over raw header OCTETS, each field value read by
+%HEADER-FIELD-TEXT."
+  (mapcar (lambda (header)
+            (cons (car header) (%header-field-text (cdr header))))
+          (parse-headers (%octets-to-ascii octets))))
+
 (defun %search-octets (pattern haystack &optional (start 0))
   (let ((plen (length pattern))
         (hlen (length haystack)))
@@ -200,7 +217,8 @@ as a last resort. → (values part-end dash-start) or NIL."
     entity))
 
 (defun parse-mime (source &key (decode t))
-  "Parse SOURCE (string, octets, or stream) as a MIME entity."
+  "Parse SOURCE (string, octets, or stream) as a MIME entity. A header field
+whose octets are valid UTF-8 is read as UTF-8, any other as ISO-8859-1."
   (let ((octets (etypecase source
                   ((vector (unsigned-byte 8)) source)
                   (string (%ascii-to-octets source))
@@ -217,7 +235,7 @@ as a last resort. → (values part-end dash-start) or NIL."
       (let* ((header-octets (if header-end (subseq octets 0 header-end) octets))
              (body (if body-start (subseq octets body-start) #()))
              (entity (make-instance 'mime-entity
-                                    :headers (parse-headers (%octets-to-ascii header-octets)))))
+                                    :headers (%parse-header-octets header-octets))))
         (%apply-headers entity)
         (if (multipart-p entity)
             (let ((boundary (and (mime-content-type entity)
