@@ -1,5 +1,5 @@
 (defsystem "mime-protocol"
-  :version "0.3.2"
+  :version "0.3.3"
   :description "CLOS MIME media-type, disposition, CTE, and multipart for cl-stack (RFC 2045/2046/2047/6266)"
   :author "egao1980"
   :license "MIT"
@@ -31,7 +31,9 @@
                (:file "form-data-browser-test")
                (:file "header-injection-test")
                (:file "encoded-word-test")
-               (:file "adversarial-r1-test"))
+               (:file "adversarial-r1-test")
+               (:file "adversarial-r2-test")
+               (:file "relay-continuation-test"))
   :perform (test-op (o c)
                     (unless (symbol-call :rove :run c)
                       (error "tests failed for ~A" (component-name c)))))

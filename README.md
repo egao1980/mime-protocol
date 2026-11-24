@@ -4,7 +4,7 @@ CLOS **MIME** media-type, Content-Disposition, Content-Transfer-Encoding, and mu
 
 Not HTTP `Content-Encoding` (gzip/br/zstd) — that stays on `http-protocol`.
 
-OCI **0.3.2** — `ghcr.io/egao1980/cl-systems/mime-protocol:0.3.2`
+OCI **0.3.3** — `ghcr.io/egao1980/cl-systems/mime-protocol:0.3.3`
 
 ```lisp
 (asdf:load-system "mime-protocol")   ; nick stack-mime; registers :mime / :multipart
@@ -21,6 +21,8 @@ OCI **0.3.2** — `ghcr.io/egao1980/cl-systems/mime-protocol:0.3.2`
 | `:mime` | RFC 2045 entity | `mime-entity` |
 | `:multipart` | `multipart/form-data` | alist / hash-table of parts |
 
+Both are binary serdes formats: `serdes-protocol:encode` returns `print-mime-octets`, so `encode-to-octets` passes them on unchanged, and their streams are octets by default (`:element-type 'character` gives one character per octet).
+
 `lookup-mime` / `mime-type` map filename extensions. `lookup-extension` is the reverse (first table match: `application/json` → `json`, `text/html` → `html`). CTE is `decode-content` / `encode-content` (`:7bit` `:8bit` `:binary` `:base64` `:quoted-printable`).
 
 ## Entities and multipart
@@ -31,7 +33,7 @@ Headers are stored lowercase (`header-value` and `set-header` are case-insensiti
 
 `parse-mime` reads each header field as UTF-8 when its octets are valid UTF-8 (browsers send form-data part headers that way, RFC 7578 §5.1.3; RFC 6532 mail does too), and as ISO-8859-1 otherwise, one character per octet.
 
-`print-mime` returns octets, one character per octet: body octets as they are and header text as UTF-8. Write the string to the wire through ISO-8859-1, or call `print-mime-octets`; `parse-mime` reads either back, whatever the header text (#16). The http-protocol `:mime` / `:multipart` data serializers hand http-protocol those octets.
+`print-mime` returns octets, one character per octet: body octets as they are and header text as UTF-8. Write the string to the wire through ISO-8859-1, or call `print-mime-octets`; `parse-mime` reads either back, whatever the header text (#16). The http-protocol `:mime` / `:multipart` data serializers hand http-protocol those octets. A parsed field whose octets were not UTF-8 (a raw windows-1251 Subject) reads as ISO-8859-1 and is printed back as the same octets, so a parse → print relay keeps it; once `set-header` replaces it, it is UTF-8. `parse-mime` of a string with a character above U+00FF signals `mime-parse-error`. Header names are looked up case-insensitively.
 
 ## Header fields
 
@@ -45,7 +47,7 @@ RFC 2047 encoded-words: `encode-header-text` turns the runs of words in unstruct
 
 ## Form-data names
 
-In a `form-data` Content-Disposition, `name` and `filename` follow the browser rule (RFC 7578 §2, §4.2; HTML "multipart/form-data encoding algorithm"): the quoted string ends at the next `"`, a backslash in it is literal (`filename="C:\x\a.svg"`), and `%22` `%0D` `%0A` decode to `"` CR LF. Other `%` sequences are kept. `format-form-data-disposition` and `format-content-disposition` escape them the same way, so a browser, http-protocol's multipart and `make-form-data` all parse back to the same names. `filename*` (RFC 8187) still wins over `filename` when both are present. Every other parameter, and every other disposition and media type, keeps RFC 822 quoted-pairs.
+In a `form-data` Content-Disposition, `name` and `filename` follow the browser rule (RFC 7578 §2, §4.2; HTML "multipart/form-data encoding algorithm"): the quoted string ends at the next `"`, a backslash in it is literal (`filename="C:\x\a.svg"`), and `%22` `%0D` `%0A` decode to `"` CR LF. Other `%` sequences are kept. `format-form-data-disposition` and `format-content-disposition` escape them the same way, so a browser, http-protocol's multipart and `make-form-data` all parse back to the same names. `filename*` (RFC 8187) still wins over `filename` when both are present. Outside form-data, a long `filename*` goes out as RFC 2231 continuations (`filename*0*=UTF-8''…; filename*1*=…`, at most 60 characters each, never cutting a character), as Python's `EmailMessage` writes them, so the field folds; `parse-content-disposition` joins continuations (encoded, plain or mixed) back into one parameter. A caller's `filename*` ext-value is used as it is only when its language part is a tag, so it cannot add parameters. `make-text-entity` encodes the text in its `:charset` (an unknown one signals `mime-encode-error`). Every other parameter, and every other disposition and media type, keeps RFC 822 quoted-pairs.
 
 ## License
 
