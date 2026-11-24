@@ -16,12 +16,15 @@ on a folded line, inside RFC 2047's 75 per word and 76 per line (section 2).")
           ((< code #x10000) 3)
           (t 4))))
 
-(defun encode-encoded-words (text)
+(defun encode-encoded-words (text &key name)
   "All of TEXT as RFC 2047 B encoded-words in UTF-8, separated by single
 spaces. Each holds a whole number of characters (section 5) and is at most
 64 characters long. A decoder drops the spaces between encoded-words (6.2),
 so the result stands for TEXT in a phrase (a display name) or in
-unstructured text. \"\" gives \"\"."
+unstructured text. \"\" gives \"\". TEXT holding CR, LF or NUL signals
+MIME-HEADER-ERROR for header NAME, as SET-HEADER does (restart USE-VALUE):
+a line break is refused, not hidden in base64."
+  (setf text (%checked-header-value name text #'%header-value-problem))
   (with-output-to-string (o)
     (let ((start 0)
           (octets 0))
