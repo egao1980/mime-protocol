@@ -68,6 +68,7 @@
            #:multipart-serdes-backend
            #:use-mime-serdes-backend
            #:use-multipart-serdes-backend
-           #:install-http-mime-hooks))
+           #:install-http-mime-hooks
+           #:canonical-header-name))
 
 (in-package #:mime-protocol)

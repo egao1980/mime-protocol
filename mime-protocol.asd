@@ -1,5 +1,5 @@
 (defsystem "mime-protocol"
-  :version "0.2.0"
+  :version "0.3.0"
   :description "CLOS MIME media-type, disposition, CTE, and multipart for cl-stack (RFC 2045/2046/6266)"
   :author "egao1980"
   :license "MIT"
@@ -25,7 +25,8 @@
                (:file "lookup-test")
                (:file "cte-test")
                (:file "multipart-test")
-               (:file "disposition-test"))
+               (:file "disposition-test")
+               (:file "nested-multipart-test"))
   :perform (test-op (o c)
              (unless (symbol-call :rove :run c)
                (error "tests failed for ~A" (component-name c)))))

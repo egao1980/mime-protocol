@@ -41,17 +41,22 @@
   (and (< i (length octets)) (= (aref octets i) 10)))
 
 (defun %find-header-break (octets)
-  "→ (values header-end body-start) or NIL."
-  (loop for i from 0 below (length octets)
-        do (cond
-             ((and (%crlf-p octets i)
-                   (< (+ i 3) (length octets))
-                   (%crlf-p octets (+ i 2)))
-              (return (values i (+ i 4))))
-             ((and (%lf-p octets i)
-                   (< (1+ i) (length octets))
-                   (%lf-p octets (1+ i)))
-              (return (values i (+ i 2)))))))
+  "→ (values header-end body-start) or NIL. An entity that starts with a
+blank line has no headers (a multipart body part may omit them)."
+  (cond
+   ((%crlf-p octets 0) (values 0 2))
+   ((%lf-p octets 0) (values 0 1))
+   (t
+    (loop for i from 0 below (length octets)
+          do (cond
+              ((and (%crlf-p octets i)
+                    (< (+ i 3) (length octets))
+                    (%crlf-p octets (+ i 2)))
+               (return (values i (+ i 4))))
+              ((and (%lf-p octets i)
+                    (< (1+ i) (length octets))
+                    (%lf-p octets (1+ i)))
+               (return (values i (+ i 2)))))))))
 
 (defun parse-headers (source)
   "Parse RFC 5322-ish headers. SOURCE is a string. → alist of (lowercase-name . value)."
@@ -117,39 +122,70 @@
          (= (aref body after) 45)
          (= (aref body (1+ after)) 45))))
 
+(defun %delimiter-end-p (body i)
+  "Does a dash-boundary that ends before I really end there? It must be
+followed by \"--\", transport padding, a line break or the end of BODY, so
+that \"--b\" is not found inside \"--b2\"."
+  (or (>= i (length body))
+      (member (aref body i) '(45 32 9 13 10))))
+
+(defun %next-delimiter (body boundary dash start)
+  "Find the delimiter that ends the part starting at START.
+RFC 2046 §5.1.1: the CRLF before \"--boundary\" belongs to the delimiter,
+not to the part, so a part whose content ends in CRLF keeps it. A bare LF
+is accepted the same way, and a \"--boundary\" with no line break before it
+as a last resort. → (values part-end dash-start) or NIL."
+  (let ((lf-dash (%ascii-to-octets (format nil "~C--~A" #\Newline boundary))))
+    (loop for from = start then (1+ lf)
+          for lf = (%search-octets lf-dash body from)
+          while lf
+          when (%delimiter-end-p body (+ lf (length lf-dash)))
+            do (return-from %next-delimiter
+                 (values (if (and (> lf start) (= 13 (aref body (1- lf))))
+                             (1- lf)
+                             lf)
+                         (1+ lf))))
+    (loop for from = start then (1+ bare)
+          for bare = (%search-octets dash body from)
+          while bare
+          when (%delimiter-end-p body (+ bare (length dash)))
+            do (return (values bare bare)))))
+
 (defun %split-multipart (body boundary)
   "→ (values preamble parts-octets-list epilogue)"
   (let* ((dash (%boundary-octets boundary))
-         (start (%search-octets dash body 0)))
+         (start (loop for from = 0 then (1+ at)
+                      for at = (%search-octets dash body from)
+                      while at
+                      when (and (or (zerop at) (= 10 (aref body (1- at))))
+                                (%delimiter-end-p body (+ at (length dash))))
+                        return at)))
     (unless start
       (error 'mime-parse-error :message "multipart body missing boundary"))
-    (let ((preamble (when (plusp start) (subseq body 0 start)))
+    (let ((preamble (when (plusp start)
+                      ;; The CRLF before the first delimiter is the delimiter's.
+                      (let ((end (if (and (>= start 2) (%crlf-p body (- start 2)))
+                                     (- start 2)
+                                     (1- start))))
+                        (when (plusp end) (subseq body 0 end)))))
           (parts '())
           (i start))
       (loop
+        ;; I is at a "--boundary" dash-boundary.
+        (unless (and (<= (+ i (length dash)) (length body))
+                     (eql (%search-octets dash body i) i))
+          (error 'mime-parse-error :message "multipart boundary desync"))
         (when (%close-boundary-p body i dash)
           (let ((after (%eol-after-boundary body (+ i (length dash) 2))))
             (return (values preamble (nreverse parts)
                             (when (< after (length body)) (subseq body after))))))
-        (unless (and (<= (+ i (length dash)) (length body))
-                     (eql (%search-octets dash body i) i))
-          (error 'mime-parse-error :message "multipart boundary desync"))
-        (setf i (%eol-after-boundary body (+ i (length dash))))
-        (let* ((crlf-dash (%ascii-to-octets
-                           (format nil "~C~C--~A" #\Return #\Newline boundary)))
-               (lf-dash (%ascii-to-octets (format nil "~C--~A" #\Newline boundary)))
-               (next (or (%search-octets crlf-dash body i)
-                         (%search-octets lf-dash body i)
-                         (%search-octets dash body i))))
-          (unless next
-            (error 'mime-parse-error :message "truncated multipart part"))
-          (let ((part-end next))
-            (when (and (>= part-end 2) (%crlf-p body (- part-end 2)))
-              (setf part-end (- part-end 2)))
-            (push (subseq body i part-end) parts)
-            (setf i (if (and (>= next 2) (%crlf-p body (- next 2)))
-                        next
-                        (or (%search-octets dash body next) next)))))))))
+        (let ((content-start (%eol-after-boundary body (+ i (length dash)))))
+          (multiple-value-bind (part-end next-dash)
+              (%next-delimiter body boundary dash content-start)
+            (unless part-end
+              (error 'mime-parse-error :message "truncated multipart part"))
+            (push (subseq body content-start part-end) parts)
+            (setf i next-dash)))))))
 
 (defun %apply-headers (entity)
   (let ((ct (header-value entity "content-type"))
@@ -200,6 +236,27 @@
                       body)))
         entity))))
 
+(defparameter +header-name-acronyms+
+  '("MIME" "ID" "MD5" "DKIM" "ARC" "SPF" "IP")
+  "Header name words printed in capitals: MIME-Version, Message-ID,
+Content-MD5, DKIM-Signature, ARC-Seal, Received-SPF, X-Originating-IP.")
+
+(defun canonical-header-name (name)
+  "NAME as mail and HTTP software print it: each hyphen-separated word
+capitalized, acronyms in capitals. \"mime-version\" → \"MIME-Version\",
+\"content-transfer-encoding\" → \"Content-Transfer-Encoding\"."
+  (with-output-to-string (out)
+    (let ((start 0))
+      (loop
+        (let* ((end (or (position #\- name :start start) (length name)))
+               (word (subseq name start end))
+               (acronym (find word +header-name-acronyms+ :test #'string-equal)))
+          (write-string (or acronym (string-capitalize word)) out)
+          (when (>= end (length name))
+            (return))
+          (write-char #\- out)
+          (setf start (1+ end)))))))
+
 (defun %write-crlf (stream)
   (write-char #\Return stream)
   (write-char #\Newline stream))
@@ -216,12 +273,14 @@
                 (string-downcase (symbol-name (mime-transfer-encoding entity))))))
 
 (defun print-mime (entity &key stream)
-  "Serialize ENTITY. Returns a string unless STREAM is supplied."
+  "Serialize ENTITY. Returns a string unless STREAM is supplied. Header
+names are printed with CANONICAL-HEADER-NAME (the model keeps them
+lowercase)."
   (check-type entity mime-entity)
   (%ensure-content-type-header entity)
   (flet ((emit (out)
            (dolist (h (mime-headers entity))
-             (write-string (car h) out)
+             (write-string (canonical-header-name (car h)) out)
              (write-string ": " out)
              (write-string (cdr h) out)
              (%write-crlf out))
