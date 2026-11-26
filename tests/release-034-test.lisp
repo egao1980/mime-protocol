@@ -46,6 +46,28 @@
      ("form-data; name=\"f\"; filename=\"safe.txt\"; filename*0=\"evil.exe\"" "safe.txt"))
   (ok (equal filename (disposition-filename (parse-content-disposition value)))))
 
+(deftest-parametrize form-data-repeated-names-are-refused
+    ((value)
+     ;; python-multipart and Werkzeug both read the last one (b, evil.exe);
+     ;; an assoc reads the first.
+     ("form-data; name=\"a\"; name=\"b\"")
+     ("form-data; name=\"a\"; filename=\"safe.txt\"; filename=\"evil.exe\"")
+     ("form-data; name=\"a\"; filename*=UTF-8''safe.txt; filename*=UTF-8''evil.exe"))
+  (ok (signals (parse-content-disposition value) 'mime-parse-error) value))
+
+(deftest form-data-filename*-equal-to-filename-is-fine
+  (let ((d (parse-content-disposition
+            (format-form-data-disposition "f" :filename (format nil "caf~C.txt" (code-char #xE9))))))
+    (ok (equal (format nil "caf~C.txt" (code-char #xE9)) (disposition-filename d)))))
+
+(deftest a-gapped-continuation-is-printed-as-it-came
+  (let* ((long (make-string 70 :initial-element #\b))
+         (d (parse-content-disposition
+             (format nil "attachment; filename*0=\"a\"; filename*2=\"~A\"" long)))
+         (back (parse-content-disposition (format-content-disposition d))))
+    (ok (equal '("filename*0" "filename*2") (mapcar #'car (content-disposition-parameters back))))
+    (ok (equal long (disposition-parameter back "filename*2")))))
+
 (deftest form-data-still-writes-utf-8-filename-and-filename*
   (let ((text (format-content-disposition
                (make-content-disposition "form-data" '(("name" . "f") ("filename" . "é.txt"))))))

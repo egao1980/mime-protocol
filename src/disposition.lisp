@@ -177,6 +177,15 @@ repeat is kept as it came."
                        (push base joined))
                       (t (push parameter out)))))))))))
 
+(defun %form-data-name-problem (parameters)
+  "Why form-data PARAMETERS would name a different field or file to
+different servers, or NIL: a repeated name, filename or filename*.
+python-multipart and Werkzeug keep the last one, an assoc the first."
+  (flet ((repeated-p (name)
+           (< 1 (count name parameters :key #'car :test #'string=))))
+    (let ((name (find-if #'repeated-p '("name" "filename" "filename*"))))
+      (and name (format nil "a repeated ~A parameter" name)))))
+
 (defun parse-content-disposition (source)
   "Parse a Content-Disposition value (RFC 6266). Quoted parameter values
    take RFC 822 quoted-pairs, except name and filename in a form-data
@@ -217,7 +226,12 @@ repeat is kept as it came."
     (make-instance 'content-disposition
                    :type type
                    :parameters (if (string= type "form-data")
-                                   parameters
+                                   (let ((problem (%form-data-name-problem parameters)))
+                                     (when problem
+                                       (error 'mime-parse-error
+                                              :message (format nil "form-data Content-Disposition with ~A"
+                                                               problem)))
+                                     parameters)
                                    (%join-continuations parameters)))))
 
 (defun %attr-char-p (char)
@@ -330,6 +344,15 @@ relayed field, see %MARK-RAW) have no UTF-8 reading: they stay plain, as
 quoted NAME*0=\"...\"; NAME*1=\"...\" continuations when long."
   (let ((text (if (%ext-parameter-p name) value (%parameter-text value))))
     (cond
+      ((%continuation-name name)
+       ;; A segment kept as it came (a set with a gap): written as it is, never
+       ;; continued again into NAME*k*0*=...; quoted unless it is ext-value text.
+       (format o "; ~A=~A" name
+               (if (and (%ext-parameter-p name)
+                        (plusp (length value))
+                        (every (lambda (c) (or (%attr-char-p c) (find c "%'"))) value))
+                   value
+                   (%quote-parameter-value text))))
       ((%ext-parameter-p name)
        (%write-ext-parameter o name value type))
       ((string= type "form-data")
