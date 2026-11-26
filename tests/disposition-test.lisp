@@ -46,10 +46,12 @@
   (ok (string= "attachment; filename=\"a\\\"b\""
                (format-content-disposition
                 (make-content-disposition "attachment" '(("filename" . "a\"b"))))))
-  (ok (string= "attachment; filename=\"é.txt\"; filename*=UTF-8''%C3%A9.txt"
+  (ok (string= "attachment; filename*=UTF-8''%C3%A9.txt"
                (format-content-disposition
                 (make-content-disposition "attachment" '(("filename" . "é.txt")))))
-      "non-ASCII filename also gets filename*")
+      ;; 0.3.4: Python's EmailMessage writes only filename* too; compat32's
+      ;; get_filename() read the raw UTF-8 filename= first, as surrogates.
+      "non-ASCII filename goes out as filename* alone")
   (ok (string= "attachment; filename*=UTF-8''%C3%A9"
                (format-content-disposition
                 (make-content-disposition "attachment" '(("filename*" . "UTF-8''%C3%A9")))))

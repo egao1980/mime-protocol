@@ -28,7 +28,10 @@
       (error 'mime-parse-error :message "invalid percent-encoding"))
     (+ (* hi 16) lo)))
 
-(defun %decode-rfc5987-value (encoded)
+(defun %decode-rfc5987-value (encoded &optional (encoding :utf-8))
+  "The %XX-encoded octets of ENCODED decoded in ENCODING (:UTF-8 or
+:ISO-8859-1, RFC 8187 3.2.1). Octets that are not text in ENCODING signal
+MIME-PARSE-ERROR."
   (let ((octets (make-array (length encoded) :element-type '(unsigned-byte 8) :fill-pointer 0)))
     (loop with i = 0
           while (< i (length encoded))
@@ -39,13 +42,21 @@
                     (error 'mime-parse-error :message "truncated percent-encoding"))
                   (vector-push (%hex-byte (char encoded (1+ i)) (char encoded (+ i 2))) octets)
                   (incf i 3))
+                 ((> (char-code c) 255)
+                  (error 'mime-parse-error
+                         :message (format nil "U+~4,'0X in an RFC 8187 ext-value" (char-code c))))
                  (t
                   (vector-push (char-code c) octets)
                   (incf i)))))
-    (encoding-protocol:decode (coerce octets '(vector (unsigned-byte 8))))))
+    (handler-case
+        (encoding-protocol:decode (coerce octets '(vector (unsigned-byte 8))) :encoding encoding)
+      (encoding-protocol:encoding-error (c)
+        (error 'mime-parse-error
+               :message (format nil "RFC 8187 ext-value is not ~(~A~): ~A" encoding c))))))
 
 (defun %parse-rfc5987 (value)
-  "charset ' [lang] ' value-chars → decoded string."
+  "charset ' [lang] ' value-chars → decoded string. iso-8859-1 is read as
+ISO-8859-1, utf-8 and us-ascii as UTF-8."
   (let ((q1 (position #\' value)))
     (unless q1
       (return-from %parse-rfc5987 value))
@@ -57,7 +68,8 @@
         (unless (member charset '("utf-8" "utf8" "us-ascii" "iso-8859-1") :test #'string=)
           (error 'mime-parse-error
                  :message (format nil "unsupported RFC 5987 charset ~S" charset)))
-        (%decode-rfc5987-value encoded)))))
+        (%decode-rfc5987-value encoded
+                               (if (string= charset "iso-8859-1") :iso-8859-1 :utf-8))))))
 
 (defparameter +form-data-escapes+
   '(("%22" . #\") ("%0D" . #\Return) ("%0A" . #\Newline))
@@ -170,7 +182,10 @@ repeat is kept as it came."
    take RFC 822 quoted-pairs, except name and filename in a form-data
    disposition, which are read the way browsers write them (see
    %READ-FORM-DATA-VALUE). RFC 2231 continuations (filename*0*=...;
-   filename*1*=...) are joined into one parameter. Signals MIME-PARSE-ERROR."
+   filename*1*=...) are joined into one parameter, except in a form-data
+   disposition: RFC 7578 4.2 has no continuations there, and python-multipart
+   does not join them, so a name*0 / filename*0 must not override the plain
+   name or filename the server reads. Signals MIME-PARSE-ERROR."
   (let* ((string (string-trim '(#\Space #\Tab #\Return #\Newline) source))
          (i 0)
          type parameters)
@@ -198,9 +213,12 @@ repeat is kept as it came."
                 (%read-parameter-value string i))
           (setf i next)
           (push (cons (string-downcase name) value) parameters))))
+    (setf parameters (nreverse parameters))
     (make-instance 'content-disposition
                    :type type
-                   :parameters (%join-continuations (nreverse parameters)))))
+                   :parameters (if (string= type "form-data")
+                                   parameters
+                                   (%join-continuations parameters)))))
 
 (defun %attr-char-p (char)
   "RFC 8187 attr-char: ALPHA / DIGIT / ! # $ & + - . ^ _ ` | ~"
@@ -281,50 +299,92 @@ never inside a character: the first holds the charset'language' prefix."
       (push current segments))
     (nreverse segments)))
 
-(defun %write-disposition-parameter (o name value &optional (type ""))
-  "Write \"; NAME=VALUE\". A NAME* ext-value longer than
+(defun %ext-parameter-p (name)
+  "Does parameter NAME end in *, so its value is an RFC 8187 ext-value?"
+  (and (plusp (length name)) (char= #\* (char name (1- (length name))))))
+
+(defun %write-ext-parameter (o name value type)
+  "Write \"; NAME=EXT\", NAME ending in *: VALUE as an RFC 8187 ext-value
+(encoded unless it is one already, never quoted). One longer than
 +CONTINUATION-LENGTH+ goes out as RFC 2231 continuations, NAME*0*=...;
 NAME*1*=..., so the field can be folded (Python's EmailMessage does the
 same), except in a form-data disposition: HTTP has no line limit and
 servers do not read continuations."
-  (cond
-    ((and (plusp (length name)) (char= #\* (char name (1- (length name)))))
-     ;; ext-value (RFC 8187): never quoted; encode unless already encoded.
-     (let ((ext (if (%ext-value-p value) value (encode-rfc5987-value value))))
-       (if (or (<= (length ext) +continuation-length+) (string= type "form-data"))
-           (format o "; ~A=~A" name ext)
-           (loop for segment in (%ext-segments ext)
+  (let ((ext (if (%ext-value-p value) value (encode-rfc5987-value value))))
+    (if (or (<= (length ext) +continuation-length+) (string= type "form-data"))
+        (format o "; ~A=~A" name ext)
+        (loop for segment in (%ext-segments ext)
+              for i from 0
+              do (format o "; ~A~D*=~A" name i segment)))))
+
+(defun %write-disposition-parameter (o name value type parameters)
+  "Write \"; NAME=VALUE\" of a disposition of TYPE whose PARAMETERS hold it.
+A NAME* is an ext-value (%WRITE-EXT-PARAMETER). In a form-data disposition
+a plain value is written whole, name and filename quoted the browser way.
+Elsewhere, as Python's EmailMessage does, a short ASCII value is written
+plain, and a non-ASCII one, or one longer than +CONTINUATION-LENGTH+ that
+no fold could shorten, as NAME*=UTF-8''... in its place (RFC 2231),
+continued NAME*0*=...; NAME*1*=... when long; none when PARAMETERS hold a
+NAME* already, which readers prefer. Raw octets of an unknown charset (a
+relayed field, see %MARK-RAW) have no UTF-8 reading: they stay plain, as
+quoted NAME*0=\"...\"; NAME*1=\"...\" continuations when long."
+  (let ((text (if (%ext-parameter-p name) value (%parameter-text value))))
+    (cond
+      ((%ext-parameter-p name)
+       (%write-ext-parameter o name value type))
+      ((string= type "form-data")
+       (if (and (%form-data-name-parameter-p type name)
+                (not (and (plusp (length text)) (every #'%tchar-p text))))
+           ;; Quoted the browser way, as PARSE-CONTENT-DISPOSITION reads it back.
+           (format o "; ~A=\"~A\"" name (%form-data-escape text))
+           (format o "; ~A=~A" name (%quote-parameter-value text))))
+      ((%raw-value-p value)
+       (if (<= (length text) +continuation-length+)
+           (format o "; ~A=~A" name (%quote-parameter-value text))
+           (loop for start from 0 below (length text) by +continuation-length+
                  for i from 0
-                 do (format o "; ~A~D*=~A" name i segment)))))
-    ((and (%form-data-name-parameter-p type name)
-          (not (and (plusp (length value)) (every #'%tchar-p value))))
-     ;; Quoted the browser way, as PARSE-CONTENT-DISPOSITION reads it back.
-     (format o "; ~A=\"~A\"" name (%form-data-escape value)))
-    (t
-     (format o "; ~A=~A" name (%quote-parameter-value value)))))
+                 do (format o "; ~A*~D=~A" name i
+                            (%quote-parameter-value
+                             (subseq text start (min (length text)
+                                                     (+ start +continuation-length+))))))))
+      ((and (%ascii-p value) (<= (length value) +continuation-length+))
+       (format o "; ~A=~A" name (%quote-parameter-value text)))
+      ((assoc (concatenate 'string name "*") parameters :test #'string=)
+       ;; Checked as the plain value would have been, then left to the NAME*.
+       (%check-header-text value))
+      (t
+       ;; A control is refused here as in a plain value, not hidden as %XX.
+       (%check-header-text value)
+       (%write-ext-parameter o (concatenate 'string name "*") value type)))))
 
 (defun format-content-disposition (disposition)
   "Serialize DISPOSITION (RFC 6266). Parameter values are quoted as needed;
    a value with CR, LF or another control character signals MIME-ENCODE-ERROR.
-   Parameters named NAME* are written as RFC 8187 ext-values, and a non-ASCII
-   filename without a filename* also gets filename*=UTF-8''...; a long
-   ext-value goes out as RFC 2231 continuations (NAME*0*=...; NAME*1*=...),
-   except in a form-data disposition.
-   In a form-data disposition, a name or filename that needs quotes is
-   quoted the browser way, as FORMAT-FORM-DATA-DISPOSITION does: \" CR LF
-   become %22 %0D %0A and a backslash stays literal."
+   Parameters named NAME* are written as RFC 8187 ext-values, and a long
+   ext-value goes out as RFC 2231 continuations (NAME*0*=...; NAME*1*=...).
+   Outside form-data a non-ASCII or long plain value goes out as such a
+   NAME* in its place, as Python's EmailMessage writes it (see
+   %WRITE-DISPOSITION-PARAMETER).
+   In a form-data disposition values are never continued, a non-ASCII
+   filename is written as UTF-8 and also as filename*=UTF-8''..., and a name
+   or filename that needs quotes is quoted the browser way, as
+   FORMAT-FORM-DATA-DISPOSITION does: \" CR LF become %22 %0D %0A and a
+   backslash stays literal."
   (check-type disposition content-disposition)
   (let ((params (content-disposition-parameters disposition))
         (type (content-disposition-type disposition)))
     (with-output-to-string (o)
       (write-string type o)
       (dolist (p params)
-        (%write-disposition-parameter o (car p) (cdr p) type))
+        (%write-disposition-parameter o (car p) (cdr p) type params))
       (let ((filename (cdr (assoc "filename" params :test #'string=))))
         (when (and filename
+                   (string= type "form-data")
                    (not (%ascii-p filename))
+                   ;; Raw octets of an unknown charset: no UTF-8 reading to add.
+                   (not (%raw-value-p filename))
                    (not (assoc "filename*" params :test #'string=)))
-          (%write-disposition-parameter o "filename*" filename type))))))
+          (%write-ext-parameter o "filename*" filename type))))))
 
 (defun %form-data-escape (string)
   "RFC 7578 section 2 / WHATWG multipart/form-data: percent-encode \" CR LF in

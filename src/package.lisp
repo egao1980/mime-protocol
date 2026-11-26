@@ -79,6 +79,7 @@
            #:install-http-mime-hooks
            #:canonical-header-name
            #:mime-boundary-error
-           #:mime-boundary-error-boundary))
+           #:mime-boundary-error-boundary
+           #:copy-headers))
 
 (in-package #:mime-protocol)

@@ -1,7 +1,11 @@
 (in-package #:mime-protocol)
 
 (defclass mime-entity ()
-  ((headers :initarg :headers :accessor mime-headers :initform nil)
+  ((headers :initarg :headers :accessor mime-headers :initform nil
+            :documentation "Alist of (lowercase-name . value), in order. A
+parsed value whose octets were not UTF-8 holds one character per octet and
+goes back out as those octets (see %MARK-RAW); that state goes with the
+value, so moving the cell to another entity keeps it.")
    (content-type :initarg :content-type :accessor mime-content-type :initform nil)
    (content-disposition :initarg :content-disposition :accessor mime-content-disposition
                         :initform nil)
@@ -10,12 +14,7 @@
    (content :initarg :content :accessor mime-content :initform nil)
    (parts :initarg :parts :accessor mime-parts :initform nil)
    (preamble :initarg :preamble :accessor mime-preamble :initform nil)
-   (epilogue :initarg :epilogue :accessor mime-epilogue :initform nil)
-   (raw-fields :initarg :raw-fields :accessor %raw-fields :initform nil
-               :documentation "Names of parsed header fields whose octets were not
-UTF-8: their values hold one character per octet, and PRINT-MIME writes
-those octets back as they came (a relay keeps them). SET-HEADER drops a
-name from here."))
+   (epilogue :initarg :epilogue :accessor mime-epilogue :initform nil))
   (:documentation "One MIME entity: headers + decoded body or multipart parts."))
 
 (defun mime-entity-p (object)
@@ -56,22 +55,41 @@ before it in an RFC 5322 reader."
         (format nil "the name holds ~A; a field name is printable ASCII without a colon (RFC 5322 3.6.8)"
                 (%char-description bad)))))))
 
-(defun %forbidden-char-problem (value codes)
+(defun %header-control-p (char)
+  "Is CHAR a C0 control other than HTAB? RFC 5322 allows none in a field
+body (VCHAR / WSP), and readers end the line at more than CR and LF:
+Python's email splits header text with str.splitlines, which breaks at VT,
+FF, FS, GS and RS too, so each one could forge a further field downstream."
+  (let ((code (char-code char)))
+    (and (< code 32) (/= code 9))))
+
+(defun %forbidden-char-problem (value &optional (forbidden-p #'%header-control-p))
   (if (not (stringp value))
       (format nil "value ~S is not a string" value)
-      (let ((i (position-if (lambda (c) (member (char-code c) codes)) value)))
+      (let ((i (position-if forbidden-p value)))
         (when i
           (let ((char (char value i)))
-            (format nil "the value holds ~A at ~D~:[; NUL is not allowed in a header (RFC 2045 2.7)~;; a line break ends the field, so the rest would be read as further fields or the body (header injection)~]"
-                    (%char-description char) i (/= 0 (char-code char))))))))
+            (format nil "the value holds ~A at ~D; ~A"
+                    (%char-description char) i
+                    (case (char-code char)
+                      ((10 13) "a line break ends the field, so the rest would be read as further fields or the body (header injection)")
+                      (0 "NUL is not allowed in a header (RFC 2045 2.7)")
+                      (t "a control character is not allowed in a field body (RFC 5322 3.2.5), and readers such as Python's email take VT, FF, FS, GS and RS as line breaks (header injection)"))))))))
 
 (defun %header-value-problem (value)
-  "Why SET-HEADER refuses VALUE (CR, LF or NUL in it), or NIL."
-  (%forbidden-char-problem value '(13 10 0)))
+  "Why SET-HEADER refuses VALUE (a C0 control other than HTAB in it), or NIL."
+  (%forbidden-char-problem value))
 
 (defun %printed-value-problem (value)
-  "Why PRINT-MIME cannot write VALUE (CR or LF in it), or NIL."
-  (%forbidden-char-problem value '(13 10)))
+  "Why PRINT-MIME cannot write VALUE (a C0 control other than HTAB in it:
+CR, LF, NUL, VT, FF, FS, GS, RS, ...), or NIL."
+  (%forbidden-char-problem value))
+
+(defun %encodable-text-problem (value)
+  "Why ENCODE-HEADER-TEXT / ENCODE-ENCODED-WORDS refuse VALUE (CR, LF or
+NUL in it), or NIL. Other controls go into an encoded-word's base64, never
+onto the wire as they are."
+  (%forbidden-char-problem value (lambda (c) (member (char-code c) '(13 10 0)))))
 
 (defun %read-header-text ()
   (format *query-io* "~&Header text: ")
@@ -106,23 +124,46 @@ the same way."
           :interactive %read-header-text
           (setf value new-value))))))
 
-(defun set-header (entity name value)
-  "Set the header field NAME of ENTITY to VALUE, replacing a field of that
-name, and return VALUE. NAME is case-insensitive and stored lowercase.
-NAME must be RFC 5322 ftext (printable ASCII without a colon) and VALUE a
-string without CR, LF or NUL: a line break in a value would end the field
-and let the rest of it forge further fields or start the body (header
-injection). Either problem signals MIME-HEADER-ERROR with a USE-VALUE
-restart. A long value needs no line breaks of its own: PRINT-MIME folds it."
-  (let* ((name (%checked-header-name name #'%header-name-problem))
-         (value (%checked-header-value name value #'%header-value-problem))
-         (key (string-downcase name))
-         (cell (assoc key (mime-headers entity) :test #'string-equal)))
-    (setf (%raw-fields entity) (remove key (%raw-fields entity) :test #'string-equal))
+(defun %put-header (entity key value)
+  "Store VALUE as ENTITY's header field KEY (lowercase), replacing the
+first field of that name, else appending one. No checks. → VALUE."
+  (let ((cell (assoc key (mime-headers entity) :test #'string-equal)))
     (if cell
         (setf (cdr cell) value)
         (setf (mime-headers entity) (nconc (mime-headers entity) (list (cons key value)))))
     value))
+
+(defun copy-headers (from to &key (test (constantly t)) remove)
+  "Append to TO's header fields those of FROM whose lowercase name satisfies
+TEST, in order, and return TO. With REMOVE, they also leave FROM: the
+fields move. Each field keeps its value, so a parsed field that was not
+UTF-8 still goes out as the octets it came in (mail-protocol's
+ADD-ATTACHMENT moves a parsed message's From, Subject, ... to a new
+multipart this way)."
+  (check-type from mime-entity)
+  (check-type to mime-entity)
+  (let ((taken (remove-if-not test (mime-headers from) :key #'car)))
+    (setf (mime-headers to)
+          (append (mime-headers to)
+                  (mapcar (lambda (cell) (cons (car cell) (cdr cell))) taken)))
+    (when remove
+      (setf (mime-headers from)
+            (remove-if (lambda (cell) (member cell taken :test #'eq)) (mime-headers from))))
+    to))
+
+(defun set-header (entity name value)
+  "Set the header field NAME of ENTITY to VALUE, replacing the first field
+of that name (other fields of the name are kept as they are), and return
+VALUE. NAME is case-insensitive and stored lowercase. NAME must be RFC 5322
+ftext (printable ASCII without a colon) and VALUE a string without a C0
+control other than HTAB: a line break in a value (CR, LF, and for some
+readers VT, FF, FS, GS, RS) would end the field and let the rest of it
+forge further fields or start the body (header injection). Either problem
+signals MIME-HEADER-ERROR with a USE-VALUE restart. A long value needs no
+line breaks of its own: PRINT-MIME folds it."
+  (let* ((name (%checked-header-name name #'%header-name-problem))
+         (value (%checked-header-value name value #'%header-value-problem)))
+    (%put-header entity (string-downcase name) value)))
 
 (defun %crlf-p (octets i)
   (and (< (1+ i) (length octets))
@@ -201,16 +242,12 @@ non-ASCII octets."
 
 (defun %parse-header-octets (octets)
   "PARSE-HEADERS over raw header OCTETS, each field value read by
-%HEADER-FIELD-TEXT. → (values headers raw-names): RAW-NAMES are the fields
-whose non-ASCII octets were not UTF-8."
-  (let ((raw '()))
-    (values (mapcar (lambda (header)
-                      (multiple-value-bind (text raw-p) (%header-field-text (cdr header))
-                        (when raw-p
-                          (pushnew (car header) raw :test #'string=))
-                        (cons (car header) text)))
-                    (parse-headers (%octets-to-ascii octets)))
-            raw)))
+%HEADER-FIELD-TEXT. A value whose non-ASCII octets were not UTF-8 is
+recorded raw (%MARK-RAW), each field on its own. → headers."
+  (mapcar (lambda (header)
+            (multiple-value-bind (text raw-p) (%header-field-text (cdr header))
+              (cons (car header) (if raw-p (%mark-raw text) text))))
+          (parse-headers (%octets-to-ascii octets))))
 
 (defun %search-octets (pattern haystack &optional (start 0))
   (let ((plen (length pattern))
@@ -321,14 +358,29 @@ as a last resort. → (values part-end dash-start) or NIL."
             (push (subseq body content-start part-end) parts)
             (setf i next-dash)))))))
 
+(defun %mark-raw-parameters (field parameters)
+  "When header FIELD is raw, record each non-ASCII value of PARAMETERS,
+parsed out of it, raw too: PRINT-MIME rebuilds Content-Type and
+Content-Disposition from them and must write those octets back as they
+came. → PARAMETERS."
+  (when (%raw-value-p field)
+    (dolist (p parameters)
+      (when (and (stringp (cdr p)) (notevery (lambda (c) (< (char-code c) 128)) (cdr p)))
+        (%mark-raw (cdr p)))))
+  parameters)
+
 (defun %apply-headers (entity)
   (let ((ct (header-value entity "content-type"))
         (cd (header-value entity "content-disposition"))
         (te (header-value entity "content-transfer-encoding")))
     (when ct
-      (setf (mime-content-type entity) (parse-media-type ct)))
+      (let ((media-type (parse-media-type ct)))
+        (%mark-raw-parameters ct (media-type-parameters media-type))
+        (setf (mime-content-type entity) media-type)))
     (when cd
-      (setf (mime-content-disposition entity) (parse-content-disposition cd)))
+      (let ((disposition (parse-content-disposition cd)))
+        (%mark-raw-parameters cd (content-disposition-parameters disposition))
+        (setf (mime-content-disposition entity) disposition)))
     (when te
       (setf (mime-transfer-encoding entity) (normalize-transfer-encoding te)))
     entity))
@@ -360,8 +412,8 @@ U+00FF signals MIME-PARSE-ERROR."
         (%find-header-break octets)
       (let* ((header-octets (if header-end (subseq octets 0 header-end) octets))
              (body (if body-start (subseq octets body-start) #()))
-             (entity (multiple-value-bind (headers raw) (%parse-header-octets header-octets)
-                       (make-instance 'mime-entity :headers headers :raw-fields raw))))
+             (entity (make-instance 'mime-entity
+                                    :headers (%parse-header-octets header-octets))))
         (%apply-headers entity)
         (if (multipart-p entity)
             (let ((boundary (and (mime-content-type entity)
@@ -406,11 +458,24 @@ capitalized, acronyms in capitals. \"mime-version\" → \"MIME-Version\",
   (write-char #\Newline stream))
 
 (defun %ensure-content-type-header (entity)
-  (when (mime-content-type entity)
-    (set-header entity "content-type" (format-media-type (mime-content-type entity))))
-  (when (mime-content-disposition entity)
-    (set-header entity "content-disposition"
-                (format-content-disposition (mime-content-disposition entity))))
+  "Write ENTITY's Content-Type, Content-Disposition and
+Content-Transfer-Encoding fields from its objects. One whose parameters
+hold a raw value (parsed, not UTF-8) is formatted as octets and recorded
+raw, so PRINT-MIME writes those octets back as they came; it is stored
+directly, not through SET-HEADER."
+  (flet ((formatted (format object parameters)
+           (if (some (lambda (p) (%raw-value-p (cdr p))) parameters)
+               (%mark-raw (let ((*octet-parameters* t)) (funcall format object)))
+               (funcall format object))))
+    (let ((ct (mime-content-type entity))
+          (cd (mime-content-disposition entity)))
+      (when ct
+        (%put-header entity "content-type"
+                     (formatted #'format-media-type ct (media-type-parameters ct))))
+      (when cd
+        (%put-header entity "content-disposition"
+                     (formatted #'format-content-disposition cd
+                                (content-disposition-parameters cd))))))
   (when (and (mime-transfer-encoding entity)
              (not (eq (mime-transfer-encoding entity) :7bit)))
     (set-header entity "content-transfer-encoding"
@@ -590,7 +655,7 @@ included, is checked before anything is written to STREAM."
     (let ((lines (loop for (name . value) in (mime-headers entity)
                        append (%header-field-lines
                                name value max-line-length
-                               (member name (%raw-fields entity) :test #'string-equal))))
+                               (%raw-value-p value))))
           (body (unless (multipart-p entity)
                   (let ((wired (encode-content (or (mime-content entity) #())
                                                (mime-transfer-encoding entity))))
@@ -630,18 +695,23 @@ included, is checked before anything is written to STREAM."
 (defun make-text-entity (text &key (subtype "plain") (charset "utf-8")
                               disposition-type name filename)
   "A text/SUBTYPE entity of TEXT, encoded in CHARSET (UTF-8 when NIL), 8bit.
-A CHARSET encoding-protocol does not know signals MIME-ENCODE-ERROR: the
-label would not match the octets."
+A CHARSET encoding-protocol does not know, or TEXT it cannot encode,
+signals MIME-ENCODE-ERROR: the label would not match the octets."
   (let* ((encoding (if charset
                        (or (%charset-encoding charset)
                            (error 'mime-encode-error
                                   :message (format nil "unknown charset ~S" charset)))
                        :utf-8))
+         (octets (handler-case (encoding-protocol:encode text :encoding encoding)
+                   (encoding-protocol:encoding-error (c)
+                     (error 'mime-encode-error
+                            :message (format nil "cannot encode the text in charset ~S: ~A"
+                                             charset c)))))
          (entity (make-instance 'mime-entity
                                 :content-type (make-media-type "text" subtype
                                                                (when charset
                                                                  (list (cons "charset" charset))))
-                                :content (encoding-protocol:encode text :encoding encoding)
+                                :content octets
                                 :transfer-encoding :8bit)))
     (when (or disposition-type name filename)
       (setf (mime-content-disposition entity)
