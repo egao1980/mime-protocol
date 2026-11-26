@@ -19,6 +19,45 @@
                                        (cons (string-downcase (car p)) (cdr p)))
                                      parameters)))
 
+;;; Raw header text. A parsed header field whose octets are not UTF-8 is
+;;; kept as one character per octet, and so are the non-ASCII parameter
+;;; values parsed out of it. The raw state belongs to that value object, not
+;;; to a field name or an entity: two fields of one name each keep their own,
+;;; a field moved to another entity takes it along, and a new value (SET-HEADER)
+;;; has none. The table is weak on its keys where the Lisp offers that.
+
+(defvar *raw-values*
+  #+sbcl (make-hash-table :test 'eq :weakness :key :synchronized t)
+  #+(or ecl abcl) (make-hash-table :test 'eq :weakness :key)
+  #+(or ccl clisp) (make-hash-table :test 'eq :weak :key)
+  #+lispworks (make-hash-table :test 'eq :weak-kind :key)
+  #+allegro (make-hash-table :test 'eq :weak-keys t)
+  #-(or sbcl ecl abcl ccl clisp lispworks allegro) (make-hash-table :test 'eq)
+  "Raw value strings → T. See %MARK-RAW.")
+
+(defun %mark-raw (string)
+  "Record STRING (one character per octet) as raw parsed header text, which
+PRINT-MIME writes back as those octets. → STRING."
+  (setf (gethash string *raw-values*) t)
+  string)
+
+(defun %raw-value-p (value)
+  "Is VALUE a string %MARK-RAW recorded?"
+  (and (stringp value) (values (gethash value *raw-values*))))
+
+(defvar *octet-parameters* nil
+  "True while a Content-Type or Content-Disposition that holds a raw
+parameter value is formatted for PRINT-MIME: every plain parameter value is
+then written as octets, one character each (a raw one as it is, any other as
+its UTF-8), so the whole field can go out as octets.")
+
+(defun %parameter-text (value)
+  "VALUE as a plain parameter is written: as it is, or as octets under
+*OCTET-PARAMETERS*."
+  (if (and *octet-parameters* (not (%raw-value-p value)))
+      (%octet-string value)
+      value))
+
 (defun %ows-p (char)
   (or (char= char #\Space) (char= char #\Tab)))
 
@@ -139,7 +178,7 @@
       (write-string "; " o)
       (write-string (car p) o)
       (write-char #\= o)
-      (write-string (%quote-parameter-value (cdr p)) o))))
+      (write-string (%quote-parameter-value (%parameter-text (cdr p))) o))))
 
 (defun media-type-parameter (media-type name)
   (cdr (assoc (string-downcase name) (media-type-parameters media-type) :test #'string=)))

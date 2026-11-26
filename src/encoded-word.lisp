@@ -24,7 +24,7 @@ so the result stands for TEXT in a phrase (a display name) or in
 unstructured text. \"\" gives \"\". TEXT holding CR, LF or NUL signals
 MIME-HEADER-ERROR for header NAME, as SET-HEADER does (restart USE-VALUE):
 a line break is refused, not hidden in base64."
-  (setf text (%checked-header-value name text #'%header-value-problem))
+  (setf text (%checked-header-value name text #'%encodable-text-problem))
   (with-output-to-string (o)
     (let ((start 0)
           (octets 0))
@@ -80,7 +80,7 @@ encoded-words (RFC 2047 5 (1)). Other words, and the blanks around a run,
 stay as they are, so plain ASCII text comes back unchanged.
 TEXT holding CR, LF or NUL signals MIME-HEADER-ERROR for header NAME, as
 SET-HEADER does (restart USE-VALUE): a line break is refused, not encoded."
-  (let ((text (%checked-header-value name text #'%header-value-problem))
+  (let ((text (%checked-header-value name text #'%encodable-text-problem))
         (out (make-string-output-stream))
         (run '())
         (blank nil))
