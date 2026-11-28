@@ -39,12 +39,13 @@
         "the same octets read back")))
 
 (deftest-parametrize form-data-reads-no-continuations
-    ((value filename)
+    ((value)
      ;; python-multipart: no filename; Werkzeug joins it to "evil.exe".
-     ("form-data; name=\"f\"; filename*0*=UTF-8''evil; filename*1=\".exe\"" nil)
-     ;; Both: "safe.txt".
-     ("form-data; name=\"f\"; filename=\"safe.txt\"; filename*0=\"evil.exe\"" "safe.txt"))
-  (ok (equal filename (disposition-filename (parse-content-disposition value)))))
+     ("form-data; name=\"f\"; filename*0*=UTF-8''evil; filename*1=\".exe\"")
+     ;; Werkzeug joins and reads evil.exe, python-multipart safe.txt.
+     ("form-data; name=\"f\"; filename=\"safe.txt\"; filename*0=\"evil.exe\""))
+  ;; 0.3.6 (#21): refused, the one reading safe for both servers.
+  (ok (signals (parse-content-disposition value) 'mime-parse-error) value))
 
 (deftest-parametrize form-data-repeated-names-are-refused
     ((value)
@@ -69,9 +70,10 @@
     (ok (equal long (disposition-parameter back "filename*2")))))
 
 (deftest form-data-still-writes-utf-8-filename-and-filename*
+  ;; 0.3.6 (#21): the UTF-8 filename only, no filename*.
   (let ((text (format-content-disposition
                (make-content-disposition "form-data" '(("name" . "f") ("filename" . "é.txt"))))))
-    (ok (equal "form-data; name=f; filename=\"é.txt\"; filename*=UTF-8''%C3%A9.txt" text) text)))
+    (ok (equal "form-data; name=f; filename=\"é.txt\"" text) text)))
 
 (deftest a-long-value-with-a-control-is-refused-not-encoded
   (dolist (filename (list (format nil "~A~C~CX: y" (make-string 100 :initial-element #\a)

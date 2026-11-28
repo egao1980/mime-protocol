@@ -30,12 +30,13 @@
           "exactly two parameters, nothing forged"))))
 
 (deftest form-data-disposition-non-ascii
+  ;; 0.3.6 (#21): no filename* in form-data (RFC 7578 4.2).
   (let ((v (format-form-data-disposition "file" :filename "résumé.pdf")))
-    (ok (string= "form-data; name=\"file\"; filename=\"résumé.pdf\"; filename*=UTF-8''r%C3%A9sum%C3%A9.pdf" v))
+    (ok (string= "form-data; name=\"file\"; filename=\"résumé.pdf\"" v))
     (ok (string= "résumé.pdf" (disposition-filename (parse-content-disposition v)))))
   (ok (string= "form-data; name=\"a\"" (format-form-data-disposition "a")))
   (ok (signals (format-form-data-disposition (format nil "a~Cb" (code-char 0)))
-               'mime-encode-error)))
+        'mime-encode-error)))
 
 (deftest format-content-disposition-safe
   (ok (signals (format-content-disposition

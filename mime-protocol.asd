@@ -1,5 +1,5 @@
 (defsystem "mime-protocol"
-  :version "0.3.5"
+  :version "0.3.6"
   :description "CLOS MIME media-type, disposition, CTE, and multipart for cl-stack (RFC 2045/2046/2047/6266)"
   :author "egao1980"
   :license "MIT"
@@ -36,7 +36,8 @@
                (:file "relay-continuation-test")
                (:file "adversarial-r3-test")
                (:file "release-034-test")
-               (:file "charset-names-test"))
+               (:file "charset-names-test")
+               (:file "form-data-ext-test"))
   :perform (test-op (o c)
                     (unless (symbol-call :rove :run c)
                       (error "tests failed for ~A" (component-name c)))))

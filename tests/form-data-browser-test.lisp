@@ -85,18 +85,18 @@ list of %WIRE pieces for that part's Content-Disposition value. → the parts."
          (first-cd (mime-content-disposition (first parts)))
          (second-cd (mime-content-disposition (second parts))))
     (ok (equal "résumé.pdf" (disposition-filename first-cd)))
-    (ok (equal "UTF-8''r%C3%A9sum%C3%A9.pdf" (disposition-parameter first-cd "filename*")))
+    (ok (null (disposition-parameter first-cd "filename*"))
+        "0.3.6 (#21): no filename* in form-data")
     (ok (equal "résumé.pdf" (disposition-parameter first-cd "filename"))
-        "filename itself is UTF-8 too")
+        "filename itself is UTF-8")
     (ok (equal name (disposition-name second-cd)) "escaped name comes back")
     (ok (equal "a\\b.txt" (disposition-filename second-cd)))
     (ok (equal '("name" "filename") (mapcar #'car (content-disposition-parameters second-cd)))
         "nothing forged"))
-  (ok (equal "é.txt"
-             (disposition-filename
-              (parse-content-disposition
-               "form-data; name=\"f\"; filename=\"fallback.txt\"; filename*=UTF-8''%C3%A9.txt")))
-      "filename* still wins"))
+  (ok (signals (parse-content-disposition
+                "form-data; name=\"f\"; filename=\"fallback.txt\"; filename*=UTF-8''%C3%A9.txt")
+        'mime-parse-error)
+      "0.3.6 (#21): a filename* that differs from filename is refused"))
 
 (deftest make-form-data-round-trips-browser-names
   (let* ((name (format nil "n\"~C~Cx" #\Return #\Newline))
