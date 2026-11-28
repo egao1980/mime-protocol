@@ -106,20 +106,14 @@
 ;;; RFC 2231 continuations on parse (new in 0.3.3).
 
 (deftest-parametrize r3-form-data-continuations-do-not-override-a-plain-parameter
-    ((value reader expected)
-     ("form-data; name*0=\"ad\"; name*1=\"min\"; name=\"user\"" #'disposition-name "user")
-     ("form-data; name=\"f\"; filename*0=\"evil.exe\"; filename=\"safe.txt\"" #'disposition-filename "safe.txt"))
-  ;; PARSE-CONTENT-DISPOSITION now joins continuations in form-data too and
-  ;; puts the joined parameter where its first segment was, so it wins over
-  ;; the plain parameter written after it. python-multipart (Starlette,
-  ;; FastAPI) does not join form-data continuations at all; Werkzeug (Flask)
-  ;; and email get_param / get_filename let the plain one win. All three read
-  ;; "user" / "safe.txt", and so did 0.3.2: the field name or upload filename
-  ;; mime-protocol hands on (DISPOSITION-NAME, the :multipart serdes table)
-  ;; now differs from what a Python server or filter in the same chain reads.
-  (let ((got (funcall reader (parse-content-disposition value))))
-    (ok (equal expected got)
-        (format nil "~S → ~S (got ~S)" value expected got))))
+    ((value)
+     ("form-data; name*0=\"ad\"; name*1=\"min\"; name=\"user\"")
+     ("form-data; name=\"f\"; filename*0=\"evil.exe\"; filename=\"safe.txt\""))
+  ;; A continuation must never override the plain parameter. 0.3.3 let the
+  ;; plain one win ("user" / "safe.txt", as python-multipart reads it), but
+  ;; Werkzeug joins name*0 / filename*0, so no single reading matches every
+  ;; server in a chain. 0.3.6 (#21) refuses the disposition instead.
+  (ok (signals (parse-content-disposition value) 'mime-parse-error) value))
 
 ;;; Long filenames still cannot be printed.
 

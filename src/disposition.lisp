@@ -181,12 +181,31 @@ repeat is kept as it came."
 
 (defun %form-data-name-problem (parameters)
   "Why form-data PARAMETERS would name a different field or file to
-different servers, or NIL: a repeated name, filename or filename*.
-python-multipart and Werkzeug keep the last one, an assoc the first."
+different servers, or NIL: a repeated name, filename or filename*
+(python-multipart and Werkzeug keep the last one, an assoc the first), or
+(0.3.6, #21) a name* / filename* parameter. RFC 7578 4.2 says filename*
+MUST NOT be used: Werkzeug reads it over filename and joins name*0 /
+filename*0 continuations, python-multipart reads neither, so only a
+filename* that reads as the filename itself is kept."
   (flet ((repeated-p (name)
-           (< 1 (count name parameters :key #'car :test #'string=))))
-    (let ((name (find-if #'repeated-p '("name" "filename" "filename*"))))
-      (and name (format nil "a repeated ~A parameter" name)))))
+           (< 1 (count name parameters :key #'car :test #'string=)))
+         (ext-p (name)
+           (some (lambda (prefix)
+                   (and (>= (length name) (length prefix))
+                        (string= prefix name :end2 (length prefix))))
+                 '("name*" "filename*"))))
+    (let ((name (find-if #'repeated-p '("name" "filename" "filename*")))
+          (ext (find-if (lambda (name) (and (ext-p name) (string/= name "filename*")))
+                        parameters :key #'car))
+          (star (assoc "filename*" parameters :test #'string=))
+          (plain (assoc "filename" parameters :test #'string=)))
+      (cond
+        (name (format nil "a repeated ~A parameter" name))
+        (ext (format nil "a ~A parameter (RFC 7578 4.2: none in form-data)" (car ext)))
+        ((and star (null plain))
+         "a filename* without a filename (RFC 7578 4.2: none in form-data)")
+        ((and star (not (equal (%parse-rfc5987 (cdr star)) (cdr plain))))
+         "a filename* that differs from its filename (RFC 7578 4.2)")))))
 
 (defun parse-content-disposition (source)
   "Parse a Content-Disposition value (RFC 6266). Quoted parameter values
@@ -391,25 +410,20 @@ quoted NAME*0=\"...\"; NAME*1=\"...\" continuations when long."
    NAME* in its place, as Python's EmailMessage writes it (see
    %WRITE-DISPOSITION-PARAMETER).
    In a form-data disposition values are never continued, a non-ASCII
-   filename is written as UTF-8 and also as filename*=UTF-8''..., and a name
-   or filename that needs quotes is quoted the browser way, as
-   FORMAT-FORM-DATA-DISPOSITION does: \" CR LF become %22 %0D %0A and a
-   backslash stays literal."
+   filename is written as UTF-8, no NAME* or continuation parameter is
+   written (0.3.6, RFC 7578 4.2), and a name or filename that needs quotes is
+   quoted the browser way, as FORMAT-FORM-DATA-DISPOSITION does: \" CR LF
+   become %22 %0D %0A and a backslash stays literal."
   (check-type disposition content-disposition)
-  (let ((params (content-disposition-parameters disposition))
-        (type (content-disposition-type disposition)))
+  (let* ((params (content-disposition-parameters disposition))
+         (type (content-disposition-type disposition))
+         (form-data (string= type "form-data")))
     (with-output-to-string (o)
       (write-string type o)
       (dolist (p params)
-        (%write-disposition-parameter o (car p) (cdr p) type params))
-      (let ((filename (cdr (assoc "filename" params :test #'string=))))
-        (when (and filename
-                   (string= type "form-data")
-                   (not (%ascii-p filename))
-                   ;; Raw octets of an unknown charset: no UTF-8 reading to add.
-                   (not (%raw-value-p filename))
-                   (not (assoc "filename*" params :test #'string=)))
-          (%write-ext-parameter o "filename*" filename type))))))
+        (unless (and form-data
+                     (or (%ext-parameter-p (car p)) (%continuation-name (car p))))
+          (%write-disposition-parameter o (car p) (cdr p) type params))))))
 
 (defun %form-data-escape (string)
   "RFC 7578 section 2 / WHATWG multipart/form-data: percent-encode \" CR LF in
@@ -428,20 +442,19 @@ quoted NAME*0=\"...\"; NAME*1=\"...\" continuations when long."
 
 (defun format-form-data-disposition (name &key filename)
   "Content-Disposition value for a multipart/form-data part (RFC 7578):
-   form-data; name=\"NAME\"[; filename=\"FILENAME\"[; filename*=UTF-8''...]]
+   form-data; name=\"NAME\"[; filename=\"FILENAME\"]
 
    NAME and FILENAME are always quoted, with \" CR LF percent-encoded (the
    browser rule), so they cannot add parameters or headers. A non-ASCII
-   FILENAME is sent as UTF-8 in filename (RFC 7578 section 4.2) and also as an
-   RFC 8187 filename* for receivers that only read that."
+   FILENAME is sent as UTF-8 in filename (RFC 7578 section 4.2), as browsers
+   send it. 0.3.6 (#21): no filename*, which RFC 7578 4.2 forbids and servers
+   read differently."
   (check-type name string)
   (check-type filename (or null string))
   (with-output-to-string (o)
     (format o "form-data; name=\"~A\"" (%form-data-escape name))
     (when filename
-      (format o "; filename=\"~A\"" (%form-data-escape filename))
-      (unless (%ascii-p filename)
-        (format o "; filename*=~A" (encode-rfc5987-value filename))))))
+      (format o "; filename=\"~A\"" (%form-data-escape filename)))))
 
 (defun disposition-parameter (disposition name)
   (cdr (assoc (string-downcase name) (content-disposition-parameters disposition)

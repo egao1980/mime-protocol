@@ -71,8 +71,9 @@
                (make-content-disposition "form-data"
                                          (list (cons "name" "f")
                                                (cons "filename" (make-string 100 :initial-element (code-char #x65E5))))))))
-    (ok (search "filename*=UTF-8''" text))
-    (ng (search "filename*0" text))))
+    ;; 0.3.6 (#21): the UTF-8 filename whole, no filename* at all.
+    (ng (search "filename*" text))
+    (ok (search (make-string 100 :initial-element (code-char #x65E5)) text))))
 
 (deftest a-caller-filename-star-cannot-add-parameters
   (let* ((d (make-content-disposition "attachment" '(("filename*" . "UTF-8'; name=evil; x='abc"))))
