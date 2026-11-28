@@ -111,19 +111,19 @@ SET-HEADER does (restart USE-VALUE): a line break is refused, not encoded."
 
 (defun %charset-encoding (charset)
   "The encoding-protocol name for MIME CHARSET (an RFC 2231 *language
-suffix dropped), or NIL when there is none. Never interns a symbol."
-  (let* ((name (string-downcase (subseq charset 0 (position #\* charset))))
-         (name (cond ((string= name "utf8") "utf-8")
-                     ((and (> (length name) 8) (string= "windows-" name :end2 8))
-                      (concatenate 'string "cp" (subseq name 8)))
-                     (t name)))
-         (keyword (and (plusp (length name))
-                       (find-symbol (string-upcase name) :keyword))))
-    (and keyword
-         (let ((encoding (encoding-protocol:normalize-encoding keyword)))
-           (and (not (member encoding '(:base64 :base64url :base32 :base32hex :base16
-                                        :quoted-printable :rle)))
-                encoding)))))
+suffix dropped), or NIL when there is none: an unknown name, a transfer
+encoding, or a charset whose system is not loaded and does not load
+(ENCODING-UNKNOWN-ENCODING). Names resolve through
+ENCODING-PROTOCOL:FIND-ENCODING, which never interns a symbol."
+  (let ((name (subseq charset 0 (position #\* charset))))
+    (handler-case
+        (multiple-value-bind (encoding unloaded-system) (encoding-protocol:find-encoding name)
+          (and encoding
+               (null unloaded-system)
+               (not (member encoding '(:base64 :base64url :base32 :base32hex :base16
+                                       :quoted-printable :rle)))
+               encoding))
+      (encoding-protocol:encoding-unknown-encoding () nil))))
 
 (defun %decode-q (text)
   "RFC 2047 4.2 Q encoding: _ is a space, =XX an octet. → octets, or NIL."

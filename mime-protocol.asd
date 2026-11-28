@@ -1,9 +1,9 @@
 (defsystem "mime-protocol"
-  :version "0.3.4"
+  :version "0.3.5"
   :description "CLOS MIME media-type, disposition, CTE, and multipart for cl-stack (RFC 2045/2046/2047/6266)"
   :author "egao1980"
   :license "MIT"
-  :depends-on ((:version "serdes-protocol" "0.2.2") (:version "encoding-protocol" "0.3.0"))
+  :depends-on ((:version "serdes-protocol" "0.2.2") (:version "encoding-protocol" "0.6.0"))
   :serial t
   :pathname "src"
   :components ((:file "package")
@@ -35,7 +35,8 @@
                (:file "adversarial-r2-test")
                (:file "relay-continuation-test")
                (:file "adversarial-r3-test")
-               (:file "release-034-test"))
+               (:file "release-034-test")
+               (:file "charset-names-test"))
   :perform (test-op (o c)
                     (unless (symbol-call :rove :run c)
                       (error "tests failed for ~A" (component-name c)))))
