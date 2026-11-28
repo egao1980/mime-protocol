@@ -29,8 +29,8 @@
     (+ (* hi 16) lo)))
 
 (defun %decode-rfc5987-value (encoded &optional (encoding :utf-8))
-  "The %XX-encoded octets of ENCODED decoded in ENCODING (:UTF-8 or
-:ISO-8859-1, RFC 8187 3.2.1). Octets that are not text in ENCODING signal
+  "The %XX-encoded octets of ENCODED decoded in ENCODING (an
+encoding-protocol charset, RFC 8187 3.2.1). Octets that are not text in ENCODING signal
 MIME-PARSE-ERROR."
   (let ((octets (make-array (length encoded) :element-type '(unsigned-byte 8) :fill-pointer 0)))
     (loop with i = 0
@@ -55,21 +55,23 @@ MIME-PARSE-ERROR."
                :message (format nil "RFC 8187 ext-value is not ~(~A~): ~A" encoding c))))))
 
 (defun %parse-rfc5987 (value)
-  "charset ' [lang] ' value-chars → decoded string. iso-8859-1 is read as
-ISO-8859-1, utf-8 and us-ascii as UTF-8."
+  "charset ' [lang] ' value-chars → decoded string, in any charset
+encoding-protocol knows (RFC 8187 requires UTF-8 and ISO-8859-1; RFC 2231
+mail uses others). us-ascii is read as UTF-8, its superset. An unknown
+charset signals MIME-PARSE-ERROR."
   (let ((q1 (position #\' value)))
     (unless q1
       (return-from %parse-rfc5987 value))
     (let ((q2 (position #\' value :start (1+ q1))))
       (unless q2
         (return-from %parse-rfc5987 value))
-      (let ((charset (string-downcase (subseq value 0 q1)))
-            (encoded (subseq value (1+ q2))))
-        (unless (member charset '("utf-8" "utf8" "us-ascii" "iso-8859-1") :test #'string=)
+      (let* ((charset (subseq value 0 q1))
+             (encoding (%charset-encoding charset))
+             (encoded (subseq value (1+ q2))))
+        (unless encoding
           (error 'mime-parse-error
                  :message (format nil "unsupported RFC 5987 charset ~S" charset)))
-        (%decode-rfc5987-value encoded
-                               (if (string= charset "iso-8859-1") :iso-8859-1 :utf-8))))))
+        (%decode-rfc5987-value encoded (if (eq encoding :ascii) :utf-8 encoding))))))
 
 (defparameter +form-data-escapes+
   '(("%22" . #\") ("%0D" . #\Return) ("%0A" . #\Newline))
